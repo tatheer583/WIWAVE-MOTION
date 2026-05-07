@@ -1,61 +1,62 @@
-# WiWave v3: Intelligent Wi-Fi Radar
+# WiWave v3: Intelligent Wi-Fi Radar 📡
 
-WiWave is an advanced, privacy-first motion detection system that transforms standard Wi-Fi signals into a high-resolution sensing fabric. Inspired by professional systems like RuView, WiWave uses **Dual-Sensor Fusion** and **Frequency Analysis** to detect human presence, walking, and even subtle breathing patterns without cameras or wearables.
+WiWave is an advanced, privacy-first motion detection system that transforms standard Wi-Fi signals into a high-resolution sensing fabric. Inspired by professional RF sensing systems, WiWave uses **Dual-Sensor Fusion** and **Frequency Domain Analysis** to detect human presence, walking, and even subtle breathing patterns—**no cameras, no wearables, no privacy intrusion.**
 
-## 🚀 Features
-
-- **Intelligence Engine v4:** Uses Fast Fourier Transforms (FFT) to distinguish between rhythmic walking (1.0-4.0 Hz) and breathing (0.1-0.5 Hz).
-- **Adaptive Room Learning:** Automatically "learns" the environment's RF signature (furniture, walls) using Exponential Moving Averages (EMA).
-- **Dual-Sensor Fusion:** Combines Macro-sensing (RSSI) for distance estimation and Micro-sensing (RTT Jitter) for precise motion tracking.
-- **3D Radar Dashboard:** A professional React-based visualization built with Three.js/React Three Fiber.
-- **Privacy First:** No cameras, no microphones. Only signal metadata is analyzed.
+## 🚀 Key Features
+*   **Intelligence Engine v4:** Utilizes Fast Fourier Transforms (FFT) to distinguish between rhythmic walking (1.0-4.0 Hz) and subtle breathing (0.1-0.5 Hz).
+*   **Dual-Sensor Fusion:** Combines **Macro-sensing** (RSSI) for long-term environment baselining and **Micro-sensing** (RTT Jitter) for high-precision motion tracking.
+*   **Adaptive Environment Learning:** Uses Exponential Moving Averages (EMA) to automatically "learn" the room's RF signature (furniture, walls, background noise).
+*   **3D Radar Dashboard:** A professional React-based visualization built with Three.js (R3F) for real-time spatial data representation.
+*   **Log-Distance Path Loss:** Improved distance estimation based on indoor RF propagation models.
 
 ## 🛠️ Tech Stack
+*   **Core:** Python 3.10+, NumPy, SciPy (Signal Processing).
+*   **Backend:** FastAPI, WebSockets, Uvicorn.
+*   **Frontend:** React, Vite, Three.js (React Three Fiber), Tailwind CSS.
+*   **Hardware:** Standard Windows Wi-Fi adapter (utilizes `netsh` and ICMP).
 
-- **Backend:** Python, FastAPI, NumPy, SciPy (FFT Analysis).
-- **Frontend:** React, Vite, Three.js (R3F), Framer Motion, Tailwind CSS.
-- **Sensors:** Windows `netsh` (RSSI) and High-frequency ICMP (RTT).
+## 📦 Installation
 
-## 📥 Installation
+1.  **Clone the Repository:**
+    ```bash
+    git clone https://github.com/tatheer583/WIWAVE-MOTION.git
+    cd WIWAVE-MOTION
+    ```
 
-1. **Clone the repository:**
-   ```bash
-   git clone <your-repo-link>
-   cd WiWave-2
-   ```
+2.  **Setup Python Environment:**
+    ```bash
+    python -m venv .venv
+    .\.venv\Scripts\activate
+    pip install -r requirements.txt
+    ```
 
-2. **Setup Python Environment:**
-   ```bash
-   python -m venv .venv
-   .\.venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-3. **Setup Frontend:**
-   ```bash
-   cd frontend
-   npm install
-   ```
+3.  **Setup Frontend Dashboard:**
+    ```bash
+    cd frontend
+    npm install
+    ```
 
 ## 🏃 How to Run
 
-1. **Start the Backend:**
-   ```bash
-   python server.py
-   ```
+### Option 1: Full 3D Dashboard (Recommended)
+1.  **Start the Backend:**
+    ```bash
+    python server.py
+    ```
+2.  **Start the Frontend:**
+    ```bash
+    cd frontend
+    npm run dev
+    ```
+3.  **Open Dashboard:** Navigate to `http://localhost:5173`
 
-2. **Start the Frontend:**
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-
-3. **Open the Dashboard:**
-   Navigate to `http://localhost:5173`.
+### Option 2: Lightweight CLI Mode
+```bash
+python main.py
+```
 
 ## 🧪 How it Works
-
-WiWave monitors the fluctuations in Wi-Fi signal timing and strength. When a human (who is mostly water) moves between a laptop and a router, they disturb the RF environment. By analyzing these disturbances in the frequency domain, we can extract signatures for different activities.
+WiWave monitors the fluctuations in Wi-Fi signal timing (RTT) and strength (RSSI). When a human (mostly water) moves through the RF field, they cause multi-path interference. By analyzing these disturbances in the frequency domain, WiWave extracts signatures for different activities, allowing for precise detection without visual surveillance.
 
 ---
 *Developed as an experimental project for intelligent Wi-Fi sensing.*

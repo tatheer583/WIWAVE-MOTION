@@ -1,9 +1,9 @@
 """
-WiWave Motion - Main Entry Point
-================================
+WiWave Motion - Main Entry Point (v3 Dual-Sensor)
+================================================
 How to run:
 1. Ensure you are on a Windows laptop with Wi-Fi connected.
-2. Install requirements: pip install matplotlib numpy
+2. Install requirements: pip install -r requirements.txt
 3. Run this file: python main.py
 
 This script integrates the reader, logger, detector, and visualizer
@@ -16,17 +16,19 @@ import os
 from datetime import datetime
 
 # Import our custom modules
-from wifi_reader import get_wifi_signal
+from wifi_reader import get_wifi_signal, get_ping_latency
 from motion_detector import MotionDetector
 from visualizer import WifiVisualizer
 
 # --- CONFIGURATION ---
-UPDATE_INTERVAL = 0.5  # Seconds between readings
+UPDATE_INTERVAL = 0.1  # Fast updates for micro-sensing (RTT)
 LOG_FILE = "logs/wiwave_main_log.csv"
 # ---------------------
 
 def main():
-    print("--- WiWave Motion Starting ---")
+    print("\n" + "="*40)
+    print("   WiWave Motion: Intelligence Engine v4")
+    print("="*40)
     
     # 1. Setup Logging
     if not os.path.exists("logs"):
@@ -36,14 +38,16 @@ def main():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["Timestamp", "Signal", "Status", "Variance"])
+            writer.writerow(["Timestamp", "Signal", "RTT", "Status", "Variance", "Distance"])
 
     # 2. Initialize Components
-    detector = MotionDetector(window_size=20, threshold=1.5)
-    visualizer = WifiVisualizer(window_size=60) # Show 30 seconds of history
+    detector = MotionDetector(sample_rate=1.0/UPDATE_INTERVAL)
+    visualizer = WifiVisualizer(window_size=100) 
     
-    print(f"Logging to: {LOG_FILE}")
-    print("Close the graph window or press Ctrl+C to exit.")
+    print(f"[*] Logging to: {LOG_FILE}")
+    print("[*] Sensors: RSSI (Macro) + RTT (Micro)")
+    print("[*] Close the graph window or press Ctrl+C to exit.")
+    print("-" * 40)
 
     try:
         # Open log file in append mode
@@ -51,33 +55,33 @@ def main():
             writer = csv.writer(f)
             
             while not visualizer.is_closed():
-                # A. Read Signal
+                # A. Read Sensors
                 signal = get_wifi_signal()
-                timestamp = datetime.now().strftime("%H:%M:%S")
+                rtt = get_ping_latency()
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 
-                if signal is not None:
-                    # B. Detect Motion
-                    detector.add_reading(signal)
-                    status, variance = detector.get_motion_status()
-                    
-                    # C. Update Graph
-                    visualizer.update(signal, status)
-                    
-                    # D. Log to CSV
-                    writer.writerow([timestamp, signal, status, f"{variance:.2f}"])
-                    f.flush()
-                    
-                    # E. Console Output
-                    print(f"[{timestamp}] Signal: {signal}% | Var: {variance:.2f} | {status}")
-                else:
-                    print(f"[{timestamp}] WARNING: Wi-Fi signal lost! Check connection.")
-                    visualizer.update(None, "DISCONNECTED")
+                # B. Process Data
+                detector.add_rssi(signal)
+                detector.add_rtt(rtt)
+                
+                status, jitter = detector.get_motion_status()
+                distance = detector.get_estimated_distance()
+                
+                # C. Update Graph (Using Signal for the main line)
+                visualizer.update(signal, status)
+                
+                # D. Log to CSV
+                writer.writerow([timestamp, signal, rtt, status, f"{jitter:.2f}", f"{distance:.2f}"])
+                f.flush()
+                
+                # E. Console Output
+                print(f"[{timestamp}] RTT: {rtt if rtt else '--':>4}ms | Var: {jitter:>5.2f} | Dist: {distance:>4.1f}m | {status}")
                 
                 # Wait for next update
                 time.sleep(UPDATE_INTERVAL)
                 
     except KeyboardInterrupt:
-        print("\nExiting gracefully...")
+        print("\n[!] Exiting gracefully...")
     finally:
         print("--- WiWave Motion Stopped ---")
 

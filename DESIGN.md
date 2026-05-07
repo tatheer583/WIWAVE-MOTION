@@ -1,54 +1,49 @@
-# WiWave Motion Design Document
+# WiWave Motion Design Document: Intelligence Engine v4
 
 ## Overview
-WiWave Motion is a experimental Python tool designed to detect human motion using nothing but the Wi-Fi signal strength (RSSI) already present in your Windows laptop. 
+WiWave Motion v3 is an experimental, privacy-first motion detection system. Unlike traditional security systems that rely on cameras or PIR sensors, WiWave utilizes **Dual-Sensor Fusion** of standard Wi-Fi signal metadata (RSSI and RTT) to detect human activity.
 
-## How It Works
-Wi-Fi signals travel from your router to your laptop. When an object (like a human body, which is mostly water) enters the path or moves near the devices, it absorbs or reflects some of the radio frequency (RF) energy. 
+## How It Works: The Dual-Sensor Fusion
+WiWave treats the Wi-Fi environment as a high-resolution sensing fabric. We analyze two primary metrics:
 
-By monitoring the **Signal Strength Percentage** (RSSI) provided by Windows, we can see small fluctuations. While a stationary environment results in a relatively steady signal, movement causes the signal to "flicker" or vary rapidly.
+1.  **Macro-Sensing (RSSI - Signal Strength):**
+    -   Used for **Long-term Environment Baselining** and **Distance Estimation**.
+    -   RSSI fluctuates slowly but provides a good indication of the overall RF "shadow" cast by objects in the room.
+2.  **Micro-Sensing (RTT - Ping Latency Jitter):**
+    -   Used for **High-Frequency Motion Tracking**.
+    -   Round-Trip Time (RTT) jitter is highly sensitive to the multi-path interference caused by human movement. Even subtle movements like breathing cause detectable phase shifts in the signal timing.
 
-## Limitations (RSSI vs CSI)
-It is important to understand that this method is "rough" detection:
-1. **RSSI (Signal Strength):** This is a single number representing the total power received. It is very noisy and can be affected by many factors (other electronics, neighbors' Wi-Fi, etc.).
-2. **CSI (Channel State Information):** Professional Wi-Fi sensing uses CSI, which provides data on how the signal behaves across many different frequencies and paths. RSSI is like looking at a single flickering lightbulb; CSI is like having a high-definition camera.
-3. **No Directionality:** We can't tell *where* the motion is, only that the signal environment is changing.
+## Intelligence Engine v4: The Brain
+The core of WiWave is the `MotionDetector` class, which uses advanced signal processing techniques:
+
+### 1. Adaptive Baselining (EMA)
+Instead of a static threshold, WiWave uses **Exponential Moving Averages (EMA)** to "learn" the environment. This allows the system to automatically adjust to:
+-   Furniture being moved.
+-   Doors being opened/closed.
+-   Slow changes in the background RF noise from neighbors.
+
+### 2. Frequency Analysis (FFT)
+To distinguish between a human walking and a curtain blowing in the wind, we perform **Fast Fourier Transforms (FFT)** on the RTT jitter data.
+-   **Breathing Band (0.1 - 0.5 Hz):** Detects the rhythmic chest movement of a stationary person.
+-   **Walking Band (1.0 - 4.0 Hz):** Detects the high-energy, faster movement of a person walking through the RF field.
+
+### 3. Probabilistic Classification
+The system combines Jitter Variance and Band Energy to classify the environment into:
+-   **CALM:** No significant activity.
+-   **SCANNING:** Detecting non-human interference (e.g., electronic noise).
+-   **HUMAN DETECTED (BREATHING):** Rhythmic low-frequency signature found.
+-   **HUMAN DETECTED (WALKING):** High-energy high-frequency signature found.
 
 ## Project Structure
+-   `wifi_reader.py`: The **Hardware Abstraction Layer**. Uses `netsh` and `ping` to gather raw signal metadata.
+-   `motion_detector.py`: The **Intelligence Engine**. Handles FFT, EMA, and classification.
+-   `server.py`: The **Orchestrator**. A FastAPI-based WebSocket server that broadcasts live data.
+-   `frontend/`: The **3D Radar Dashboard**. Built with React and Three.js for real-time spatial visualization.
 
-- `wifi_reader.py`: The "Sensor". It talks to Windows to get the current signal strength.
-- `data_logger.py`: The "Recorder". It saves the signal data to a CSV file for later analysis.
-- `motion_detector.py`: The "Brain". It looks at the last few seconds of data and decides if it looks like "Motion" or "Calm".
-- `visualizer.py`: The "Eyes". It draws a live graph so you can see the signal changes in real-time.
-- `main.py`: The "Manager". It connects all the pieces together into one running program.
+## Technical Limitations
+-   **Windows-Specific:** Currently relies on `netsh` and `ping` commands native to Windows.
+-   **RSSI Noise:** RSSI is a coarse metric; the engine relies more heavily on RTT jitter for precision.
+-   **Interference:** High network traffic on the host machine can introduce "artificial" jitter.
 
-## Motion Detection Logic
-We use a **Sliding Window Variance** approach:
-- We keep track of the last 20-30 readings.
-- We calculate the **Variance** (how much the numbers spread out from the average).
-
-## How to Experiment
-
-### 1. Run the Program
-Open your terminal in the project folder and run:
-```powershell
-python main.py
-```
-
-### 2. Establish a Baseline (Calm)
-- Set your laptop on a stable table.
-- Move away from the laptop and router (or stay very still).
-- Let the program run for 1-2 minutes.
-- Look at the "Variance" value in the console. This is your "noise floor."
-
-### 3. Test for Motion
-- Walk slowly between your laptop and your Wi-Fi router.
-- Watch the graph. You should see the signal line start to "flicker" up and down.
-- The status should change to **MOTION LIKELY**.
-
-### 4. Tuning
-If the detector is not working correctly, open `main.py` (or `motion_detector.py`) and adjust these:
-- **MOTION_THRESHOLD**: If it says "Motion" when you are still, increase this (e.g., to 3.0). If it never detects you, decrease it (e.g., to 0.5).
-- **WINDOW_SIZE**: A larger window makes the detector more stable but slower to react.
-
-**Note:** This is a rough demo. It may be affected by neighbors' Wi-Fi, other 2.4GHz devices (like microwaves), or even the internal power management of your Wi-Fi card.
+---
+*WiWave is an experimental project exploring the boundaries of device-free sensing.*
