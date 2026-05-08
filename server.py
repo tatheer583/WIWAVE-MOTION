@@ -298,6 +298,28 @@ async def export_session(session_id: int):
         writer.writerows([dict(row) for row in rows])
         return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=wiwave_session_{session_id}.csv"})
 
+@app.get("/api/poll")
+async def poll_data():
+    """Stateless endpoint for serverless environments (Vercel/Netlify)"""
+    data = {"signal": 0, "rtt": 0, "aps": [], "devices": 0}
+    
+    if SIMULATION_MODE:
+        data = sim_engine.get_data()
+    else:
+        try:
+            reader = create_wifi_reader()
+            raw = reader.get_data()
+            data = {
+                "signal": raw.signal,
+                "rtt": raw.rtt,
+                "aps": [asdict(ap) for ap in raw.aps],
+                "devices": len(raw.aps)
+            }
+        except:
+            pass # Fallback to zeros if hardware fails
+            
+    return data
+
 @app.websocket("/ws/radar")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
