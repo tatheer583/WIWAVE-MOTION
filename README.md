@@ -1,5 +1,7 @@
 # WiWave v4: Intelligent Wi-Fi Radar 📡
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/tatheer583/WIWAVE-MOTION)
+
 WiWave is an advanced, privacy-first motion detection system that transforms standard Wi-Fi signals into a high-resolution sensing fabric. Inspired by professional RF sensing systems, WiWave uses **Dual-Sensor Fusion** and **Frequency Domain Analysis** to detect human presence, walking, and even subtle breathing patterns—**no cameras, no wearables, no privacy intrusion.**
 
 ## 🚀 Key Features
