@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wiwave-radar
+    env: python
+    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build
+    startCommand: python server.py
+    envVars:
+      - key: SIMULATION_MODE
+        value: "true"
+      - key: PYTHON_VERSION
+        value: 3.10.0

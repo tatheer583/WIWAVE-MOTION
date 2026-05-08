@@ -32,7 +32,9 @@ export const useRadarWebSocket = () => {
             clearTimeout(reconnectTimeoutRef.current);
         }
 
-        const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/radar';
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host || 'localhost:8000';
+        const wsUrl = import.meta.env.VITE_WS_URL || `${protocol}//${host}/ws/radar`;
         const socket = new WebSocket(wsUrl);
         socketRef.current = socket;
 
