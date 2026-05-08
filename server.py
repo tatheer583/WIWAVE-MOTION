@@ -4,6 +4,8 @@ import asyncio
 import csv
 import io
 import re
+import os
+import random
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,9 @@ from wifi_reader import create_wifi_reader, get_network_devices, HardwareError
 from motion_detector import MotionDetector
 
 app = FastAPI(title="WiWave 3D Radar v4 (Full Persistence + Zoning)")
+
+# Use environment variable for simulation mode, or auto-detect
+SIMULATION_MODE = os.getenv("SIMULATION_MODE", "false").lower() == "true"
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +53,32 @@ async def init_db():
             )
         """)
         await db.commit()
+
+# --- SIMULATION ENGINE ---
+class SimulationEngine:
+    def __init__(self):
+        self.base_rssi = 75
+        self.base_rtt = 30
+        self.counter = 0
+
+    def get_data(self):
+        self.counter += 1
+        # Create a "walking" pattern every 20 seconds
+        is_walking = (self.counter % 200) > 150 
+        
+        rssi_noise = random.uniform(-1, 1)
+        rtt_noise = random.uniform(-5, 5)
+        
+        if is_walking:
+            rssi_noise += random.uniform(-5, 5)
+            rtt_noise += random.uniform(20, 100)
+            
+        return {
+            "signal": max(0, min(100, self.base_rssi + rssi_noise)),
+            "rtt": max(1, self.base_rtt + rtt_noise),
+            "aps": [{"bssid": "SIM:01:02:03", "signal": 80}, {"bssid": "SIM:04:05:06", "signal": 45}],
+            "devices": 3
+        }
 
 # --- ZONE CLASSIFIER ---
 class ZoneClassifier:
@@ -115,7 +146,8 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 detector = MotionDetector()
-reader = create_wifi_reader()
+reader = None
+simulator = SimulationEngine()
 recorder = SessionRecorder()
 zones = ZoneClassifier()
 data_queue = asyncio.Queue(maxsize=200)
@@ -125,28 +157,48 @@ active_aps = []
 
 # --- SENSOR LOOPS ---
 async def adaptive_sensor_loop():
-    global is_motion_active
+    global is_motion_active, reader, SIMULATION_MODE, active_aps, device_count
+    
+    # Initialize hardware reader if not in simulation mode
+    if not SIMULATION_MODE:
+        try:
+            reader = create_wifi_reader()
+        except Exception:
+            print("!!! Hardware access failed. Falling back to SIMULATION MODE.")
+            SIMULATION_MODE = True
+
     while True:
         try:
             start_time = asyncio.get_event_loop().time()
             rate = 10.0 if is_motion_active else 2.0
-            rtt = await reader.get_rtt()
-            signal = reader.get_rssi()
+            
+            if SIMULATION_MODE:
+                sim_data = simulator.get_data()
+                rtt, signal = sim_data["rtt"], sim_data["signal"]
+                active_aps = sim_data["aps"]
+                device_count = sim_data["devices"]
+            else:
+                rtt = await reader.get_rtt()
+                signal = reader.get_rssi()
+            
             await data_queue.put({"rtt": rtt, "signal": signal, "ts": datetime.now()})
             elapsed = asyncio.get_event_loop().time() - start_time
             await asyncio.sleep(max(0, (1.0/rate) - elapsed))
         except HardwareError:
             await manager.broadcast(json.dumps({"type": "system_status", "status": "hw_disconnected"}))
             await asyncio.sleep(5)
-        except Exception: await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Sensor Loop Error: {e}")
+            await asyncio.sleep(1)
 
 async def network_scan_loop():
-    global active_aps, device_count
+    global active_aps, device_count, reader, SIMULATION_MODE
     while True:
-        try:
-            active_aps = reader.get_all_aps()
-            device_count = get_network_devices()
-        except: pass
+        if not SIMULATION_MODE and reader:
+            try:
+                active_aps = reader.get_all_aps()
+                device_count = get_network_devices()
+            except: pass
         await asyncio.sleep(10)
 
 async def processing_loop():
@@ -176,7 +228,8 @@ async def processing_loop():
             "active_zone": active_zone, "signal": signal or 0, "rtt": rtt or 0,
             "variance": round(jitter, 3), "status": "NO SIGNAL" if consecutive_none_count >= 30 else status,
             "learning_progress": round(learn_progress, 2), "motion_detected": is_motion_active,
-            "distance": round(distance, 2)
+            "distance": round(distance, 2),
+            "is_simulation": SIMULATION_MODE
         }
         await manager.broadcast(json.dumps(payload))
         
