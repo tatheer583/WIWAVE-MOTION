@@ -6,6 +6,7 @@ import io
 import re
 import os
 import random
+import numpy as np
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,22 +39,25 @@ class ZoneMap(BaseModel):
 DB_PATH = "wiwave_sessions.db"
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                start_time TEXT, end_time TEXT, name TEXT
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS telemetry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER,
-                timestamp TEXT, rssi REAL, rtt REAL, breathing_hz REAL,
-                walking_energy REAL, status TEXT, active_zone TEXT,
-                FOREIGN KEY(session_id) REFERENCES sessions(id)
-            )
-        """)
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_time TEXT, end_time TEXT, name TEXT
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER,
+                    timestamp TEXT, rssi REAL, rtt REAL, breathing_hz REAL,
+                    walking_energy REAL, status TEXT, active_zone TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(id)
+                )
+            """)
+            await db.commit()
+    except Exception as e:
+        print(f"Database initialization skipped (possibly read-only FS): {e}")
 
 # --- SIMULATION ENGINE ---
 class SimulationEngine:
@@ -68,15 +72,40 @@ class SimulationEngine:
         is_walking = (self.counter % 200) > 150 
         
         rssi_noise = random.uniform(-1, 1)
-        rtt_noise = random.uniform(-5, 5)
+        rtt_noise = random.uniform(-2, 2)
+        
+        status = "CALM / NO MOTION"
+        bpm = None
         
         if is_walking:
             rssi_noise += random.uniform(-5, 5)
             rtt_noise += random.uniform(20, 100)
+            status = "HUMAN DETECTED: WALKING (1.2Hz)"
+        else:
+            # Simulate subtle 1.2 Hz (72 BPM) heart rate micro-modulation
+            heart_rate_hz = 1.2
+            breathing_hz = 0.25
+            t = self.counter * 0.1 
+            rtt_noise += 0.5 * np.sin(2 * np.pi * breathing_hz * t)
+            rtt_noise += 0.15 * np.sin(2 * np.pi * heart_rate_hz * t)
+            
+            if (self.counter % 100) < 40: # Simulate breathing detection sometimes
+                status = "HUMAN DETECTED: BREATHING (0.25Hz)"
+                bpm = 72.0 + random.uniform(-2, 2)
             
         return {
+            "type": "radar_update",
+            "timestamp": datetime.now().isoformat(),
             "signal": max(0, min(100, self.base_rssi + rssi_noise)),
             "rtt": max(1, self.base_rtt + rtt_noise),
+            "variance": round(random.uniform(1, 2) if not is_walking else random.uniform(20, 50), 3),
+            "status": status,
+            "bpm": round(bpm, 1) if bpm else None,
+            "motion_detected": is_walking,
+            "distance": round(random.uniform(2, 5), 2),
+            "active_zone": "Living Room",
+            "is_simulation": True,
+            "learning_progress": 1.0,
             "aps": [{"bssid": "SIM:01:02:03", "signal": 80}, {"bssid": "SIM:04:05:06", "signal": 45}],
             "devices": 3
         }
@@ -155,6 +184,7 @@ data_queue = asyncio.Queue(maxsize=200)
 device_count = 0
 is_motion_active = False
 active_aps = []
+latest_payload = {} # Global cache for polling fallback
 
 # --- SENSOR LOOPS ---
 async def adaptive_sensor_loop():
@@ -171,7 +201,8 @@ async def adaptive_sensor_loop():
     while True:
         try:
             start_time = asyncio.get_event_loop().time()
-            rate = 10.0 if is_motion_active else 2.0
+            # Heart rate requires at least 10Hz regardless of motion status
+            rate = 10.0
             
             if SIMULATION_MODE:
                 sim_data = simulator.get_data()
@@ -203,7 +234,7 @@ async def network_scan_loop():
         await asyncio.sleep(10)
 
 async def processing_loop():
-    global is_motion_active
+    global is_motion_active, latest_payload
     consecutive_none_count = 0
     while True:
         data = await data_queue.get()
@@ -217,12 +248,10 @@ async def processing_loop():
             consecutive_none_count = 0
             detector.add_rtt(rtt, timestamp=ts)
         detector.add_rssi(signal)
-        status, jitter, fall_event, learn_progress, gesture_event = detector.get_motion_status()
+        status, jitter, fall_event, learn_progress, gesture_event, bpm = detector.get_motion_status()
         distance = detector.get_estimated_distance()
         is_motion_active = "DETECTED" in status
         active_zone = zones.get_zone(active_aps)
-        freqs = detector._analyze_frequencies()
-        b_energy, w_energy, b_hz, w_hz = freqs["breathing_energy"], freqs["walking_energy"], freqs["breathing_hz"], freqs["walking_hz"]
 
         payload = {
             "type": "radar_update", "timestamp": ts.isoformat(),
@@ -230,8 +259,10 @@ async def processing_loop():
             "variance": round(jitter, 3), "status": "NO SIGNAL" if consecutive_none_count >= 30 else status,
             "learning_progress": round(learn_progress, 2), "motion_detected": is_motion_active,
             "distance": round(distance, 2),
+            "bpm": round(bpm, 1) if bpm else None,
             "is_simulation": SIMULATION_MODE
         }
+        latest_payload = payload
         await manager.broadcast(json.dumps(payload))
         
         # Handle Fall Alert
@@ -301,24 +332,15 @@ async def export_session(session_id: int):
 @app.get("/api/poll")
 async def poll_data():
     """Stateless endpoint for serverless environments (Vercel/Netlify)"""
-    data = {"signal": 0, "rtt": 0, "aps": [], "devices": 0}
-    
+    # In Simulation Mode, return a rich mock payload directly
     if SIMULATION_MODE:
-        data = sim_engine.get_data()
-    else:
-        try:
-            reader = create_wifi_reader()
-            raw = reader.get_data()
-            data = {
-                "signal": raw.signal,
-                "rtt": raw.rtt,
-                "aps": [asdict(ap) for ap in raw.aps],
-                "devices": len(raw.aps)
-            }
-        except:
-            pass # Fallback to zeros if hardware fails
-            
-    return data
+        return simulator.get_data()
+        
+    if latest_payload:
+        return latest_payload
+    
+    # Fallback for real hardware if processing loop hasn't run
+    return {"signal": 0, "rtt": 0, "status": "INITIALIZING...", "is_simulation": False}
 
 @app.websocket("/ws/radar")
 async def websocket_endpoint(websocket: WebSocket):
@@ -348,4 +370,6 @@ else:
         return {"message": "WiWave API is running. Build the frontend to see the dashboard."}
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    is_dev = os.getenv("ENVIRONMENT", "dev").lower() == "dev"
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=is_dev)
