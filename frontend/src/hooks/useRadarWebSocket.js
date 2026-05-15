@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 /**
  * Custom hook to manage WebSocket connection for WiWave Radar v4.
+ * Supports both single-person and multi-person detection payloads.
  */
 export const useRadarWebSocket = () => {
     const [radarData, setRadarData] = useState({
@@ -16,57 +17,77 @@ export const useRadarWebSocket = () => {
         learningProgress: 0,
         isLearning: false,
         activeZone: 'Unknown',
-        systemStatus: 'ok', // 'hw_disconnected', 'no_signal', 'ok'
+        bpm: null,
+        systemStatus: 'ok',
+        // Multi-person fields
+        personCount: 0,
+        persons: [],
+        zoneCongestion: {},
+        multiPersonMode: 'single_person',
     });
 
     const [alerts, setAlerts] = useState({
         fall: null,
-        gesture: null
+        gesture: null,
     });
 
     const socketRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
 
     const connect = useCallback(() => {
-        if (reconnectTimeoutRef.current) {
-            clearTimeout(reconnectTimeoutRef.current);
-        }
+        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host || 'localhost:8000';
         const wsUrl = import.meta.env.VITE_WS_URL || `${protocol}//${host}/ws/radar`;
         const pollUrl = `${window.location.protocol}//${host}/api/poll`;
-        
+
         let isPolling = false;
 
         const startPolling = () => {
             if (isPolling) return;
             isPolling = true;
-            console.log("Switching to Polling Mode (Vercel/Serverless)");
-            
+            console.log('Switching to Polling Mode (Vercel/Serverless)');
+
             const pollInterval = setInterval(async () => {
                 try {
                     const response = await fetch(pollUrl);
                     const data = await response.json();
-                    
-                    // Simple frontend DSP for serverless mode
-                    const simulatedJitter = data.rtt > 50 ? (data.rtt / 10) : (Math.random() * 2);
-                    
-                    setRadarData(prev => ({
-                        ...prev,
-                        signal: data.signal || 0,
-                        rtt: data.rtt || 0,
-                        variance: simulatedJitter,
-                        status: simulatedJitter > 5 ? 'HUMAN DETECTED (POLLING)' : 'CALM (POLLING)',
-                        motionDetected: simulatedJitter > 5,
-                        isConnected: true,
-                        deviceCount: data.devices || 0,
-                        systemStatus: 'ok'
-                    }));
+
+                    if (data.type === 'radar_update' || data.status) {
+                        setRadarData(prev => ({
+                            ...prev,
+                            signal: data.signal || 0,
+                            rtt: data.rtt || 0,
+                            variance: data.variance || 0,
+                            status: data.status || 'CONNECTED',
+                            motionDetected: data.motion_detected || false,
+                            distance: data.distance || prev.distance,
+                            learningProgress: data.learning_progress || 1.0,
+                            isLearning: (data.learning_progress || 1.0) < 1.0,
+                            activeZone: data.active_zone || prev.activeZone,
+                            bpm: data.bpm || null,
+                            isConnected: true,
+                            systemStatus: 'ok',
+                            personCount: data.person_count || 0,
+                            persons: data.persons || [],
+                            zoneCongestion: data.zone_congestion || {},
+                            multiPersonMode: data.multi_person_mode || 'single_person',
+                        }));
+                    } else {
+                        setRadarData(prev => ({
+                            ...prev,
+                            signal: data.signal || 0,
+                            rtt: data.rtt || 0,
+                            isConnected: true,
+                            status: 'POLLING (RAW)',
+                            systemStatus: 'ok',
+                        }));
+                    }
                 } catch (err) {
-                    console.error("Polling error:", err);
+                    console.error('Polling error:', err);
                 }
-            }, 500); // 2Hz polling for serverless
+            }, 1000);
 
             return () => clearInterval(pollInterval);
         };
@@ -79,18 +100,62 @@ export const useRadarWebSocket = () => {
         };
 
         socket.onmessage = (event) => {
-            // ... (keep existing WebSocket logic)
+            try {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'radar_update') {
+                    setRadarData(prev => ({
+                        ...prev,
+                        signal: data.signal,
+                        rtt: data.rtt,
+                        variance: data.variance,
+                        status: data.status,
+                        motionDetected: data.motion_detected,
+                        distance: data.distance,
+                        learningProgress: data.learning_progress,
+                        isLearning: data.learning_progress < 1.0,
+                        activeZone: data.active_zone,
+                        bpm: data.bpm,
+                        systemStatus: 'ok',
+                        // Multi-person fields from radar_update
+                        personCount: data.person_count || 0,
+                        persons: data.persons || [],
+                        zoneCongestion: data.zone_congestion || {},
+                        multiPersonMode: data.multi_person_mode || 'single_person',
+                    }));
+                } else if (data.type === 'multi_person_update') {
+                    // Dedicated multi-person update message
+                    setRadarData(prev => ({
+                        ...prev,
+                        personCount: data.person_count || 0,
+                        persons: data.persons || [],
+                        zoneCongestion: data.zone_congestion || {},
+                        multiPersonMode: data.mode || 'multi_person',
+                    }));
+                } else if (data.type === 'fall_alert') {
+                    setAlerts(prev => ({ ...prev, fall: data }));
+                    setTimeout(() => setAlerts(prev => ({ ...prev, fall: null })), 5000);
+                } else if (data.type === 'gesture') {
+                    setAlerts(prev => ({ ...prev, gesture: data }));
+                    setTimeout(() => setAlerts(prev => ({ ...prev, gesture: null })), 3000);
+                } else if (data.type === 'system_status') {
+                    setRadarData(prev => ({ ...prev, systemStatus: data.status }));
+                }
+            } catch (err) {
+                console.error('Error parsing WebSocket message:', err);
+            }
         };
 
         socket.onclose = () => {
             setRadarData(prev => ({ ...prev, isConnected: false, status: 'OFFLINE' }));
-            // On Vercel, WebSocket will fail immediately. Start polling as fallback.
-            startPolling();
+            if (window.location.hostname.includes('vercel.app')) {
+                startPolling();
+            } else {
+                reconnectTimeoutRef.current = setTimeout(connect, 3000);
+            }
         };
 
-        socket.onerror = () => {
-            socket.close();
-        };
+        socket.onerror = () => { socket.close(); };
     }, []);
 
     useEffect(() => {

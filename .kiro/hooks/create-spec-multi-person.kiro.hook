@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "name": "Create Spec for Multi-Person Detection",
+  "description": "Create spec for multi-person detection enhancement",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Create a comprehensive spec for implementing multi-person detection in the WiWave project. The spec should include:\n\n1. **Requirements**: Multi-person detection capability, person separation, position tracking\n2. **Design**: Cross-viewpoint fusion, clustering algorithms, signal separation techniques\n3. **Tasks**: Implementation steps, testing, validation\n\nUse the feature-requirements-first-workflow to build this spec systematically."
+  },
+  "workspaceFolderName": "WiWave 2",
+  "shortName": "create-spec-multi-person"
+}

@@ -64,7 +64,7 @@ def main():
                 detector.add_rssi(signal)
                 detector.add_rtt(rtt)
                 
-                status, jitter = detector.get_motion_status()
+                status, jitter, fall, progress, gesture, bpm = detector.get_motion_status()
                 distance = detector.get_estimated_distance()
                 
                 # C. Update Graph (Using Signal for the main line)
@@ -75,7 +75,8 @@ def main():
                 f.flush()
                 
                 # E. Console Output
-                print(f"[{timestamp}] RTT: {rtt if rtt else '--':>4}ms | Var: {jitter:>5.2f} | Dist: {distance:>4.1f}m | {status}")
+                bpm_str = f"| BPM: {bpm:>3.0f}" if bpm else ""
+                print(f"[{timestamp}] RTT: {rtt if rtt else '--':>4}ms | Var: {jitter:>5.2f} | Dist: {distance:>4.1f}m {bpm_str} | {status}")
                 
                 # Wait for next update
                 time.sleep(UPDATE_INTERVAL)

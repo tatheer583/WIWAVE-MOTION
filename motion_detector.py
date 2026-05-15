@@ -8,6 +8,13 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("WiWave.DSP")
 
+# Optional multi-person detection integration
+try:
+    from multi_person.modules.orchestrator import MultiPersonDetector as _MultiPersonDetector
+    _MULTI_PERSON_AVAILABLE = True
+except ImportError:
+    _MULTI_PERSON_AVAILABLE = False
+
 class FilterError(Exception):
     """Raised when filter coefficients are numerically unstable."""
     pass
@@ -143,24 +150,56 @@ class DetectorConfig:
     RSSI_WINDOW: int = 50; RTT_WINDOW: int = 100; MIN_BUFFER: int = 32
     KALMAN_Q_RSSI: float = 0.001; KALMAN_R_RSSI: float = 10.0; KALMAN_Q_RTT: float = 0.1; KALMAN_R_RTT: float = 1.0
     BREATHING_BAND: tuple = (0.1, 0.5); WALKING_BAND: tuple = (1.0, 4.0)
+    HEART_RATE_BAND: tuple = (0.8, 2.5) # 48 - 150 BPM
     FILTER_LOW: float = 0.05; FILTER_HIGH: float = 4.99
     JITTER_THRESHOLD_WALKING: float = 8.0; JITTER_THRESHOLD_BREATHING: float = 2.0
     ENERGY_THRESHOLD_WALKING: float = 1.0; ENERGY_THRESHOLD_BREATHING: float = 0.2
+    ENERGY_THRESHOLD_HEART: float = 0.01 # Very subtle
     SIGMA_RSSI: float = 2.5; SIGMA_RTT: float = 0.4
 
 def build_bandpass_filter(low_hz, high_hz, fs, order=4):
     nyq = 0.5 * fs; low, high = low_hz / nyq, high_hz / nyq
     return butter(order, [low, high], btype='band', output='sos')
 
+class HeartRateDetector:
+    """
+    Detects micro-fluctuations in RTT corresponding to heart rate.
+    Requires the subject to be very still.
+    """
+    def __init__(self, window_size=100):
+        self.window_size = window_size
+        self.history = []
+
+    def update(self, freq_data, is_still):
+        if not is_still:
+            self.history = []
+            return None
+        
+        bpm = freq_data.get("heart_rate_bpm", 0)
+        energy = freq_data.get("heart_energy", 0)
+        
+        if energy > 0.005: # Minimum energy threshold for heart rate
+            self.history.append(bpm)
+            if len(self.history) > 10: self.history.pop(0)
+            return float(np.median(self.history))
+        return None
+
 class MotionDetector:
-    def __init__(self, sample_rate=10.0, config: DetectorConfig = None):
+    def __init__(self, sample_rate=10.0, config: DetectorConfig = None, enable_multi_person: bool = False):
         self.sample_rate = sample_rate
         self.config = config or DetectorConfig()
         self.rssi_history, self.rtt_history, self.ts_history = [], [], []
         self.kf_rssi = KalmanFilter1D(Q=self.config.KALMAN_Q_RSSI, R=self.config.KALMAN_R_RSSI)
         self.kf_rtt = KalmanFilter1D(Q=self.config.KALMAN_Q_RTT, R=self.config.KALMAN_R_RTT)
         self.fall_detector, self.sleep_tracker, self.gesture_detector = FallDetector(), SleepTracker(), GestureDetector(sample_rate)
+        self.heart_detector = HeartRateDetector(window_size=self.config.RTT_WINDOW)
         self.last_activity, self.confidence, self.last_uncertainty = "CALM", 1.0, 1.0
+
+        # Multi-person detection (optional)
+        self.multi_person_detector = None
+        if enable_multi_person and _MULTI_PERSON_AVAILABLE:
+            self.multi_person_detector = _MultiPersonDetector()
+            logger.info("Multi-person detection enabled.")
 
     def add_rssi(self, value: float):
         if value is None: return
@@ -178,7 +217,11 @@ class MotionDetector:
         logger.info("RTT State Reset: Signal loss detected.")
 
     def _analyze_frequencies(self):
-        fallback = {"breathing_energy": 0.0, "walking_energy": 0.0, "breathing_hz": 0.0, "walking_hz": 0.0, "status": "low_fs"}
+        fallback = {
+            "breathing_energy": 0.0, "walking_energy": 0.0, 
+            "heart_energy": 0.0, "breathing_hz": 0.0, 
+            "walking_hz": 0.0, "heart_rate_bpm": 0.0, "status": "low_fs"
+        }
         if len(self.rtt_history) < self.config.MIN_BUFFER: return fallback
         ts_diffs = np.diff(self.ts_history)
         actual_fs = 1.0 / np.mean(ts_diffs) if len(ts_diffs) > 0 and np.mean(ts_diffs) > 0 else self.sample_rate
@@ -202,7 +245,9 @@ class MotionDetector:
             
         logger.debug(f"Calling welch() with actual_fs={actual_fs:.2f}Hz")
         f, pxx = welch(processed_data, fs=actual_fs, nperseg=len(processed_data), detrend='constant')
-        b_mask, w_mask = (f >= self.config.BREATHING_BAND[0]) & (f <= self.config.BREATHING_BAND[1]), (f >= self.config.WALKING_BAND[0]) & (f <= self.config.WALKING_BAND[1])
+        b_mask = (f >= self.config.BREATHING_BAND[0]) & (f <= self.config.BREATHING_BAND[1])
+        w_mask = (f >= self.config.WALKING_BAND[0]) & (f <= self.config.WALKING_BAND[1])
+        h_mask = (f >= self.config.HEART_RATE_BAND[0]) & (f <= self.config.HEART_RATE_BAND[1])
         
         if not np.any(b_mask) or not np.any(w_mask):
             logger.warning(f"Low sampling rate ({actual_fs:.2f}Hz). Frequency bands not populated.")
@@ -211,21 +256,25 @@ class MotionDetector:
         try:
             b_en = float(np.trapezoid(pxx[b_mask], f[b_mask]))
             w_en = float(np.trapezoid(pxx[w_mask], f[w_mask]))
+            h_en = float(np.trapezoid(pxx[h_mask], f[h_mask])) if np.any(h_mask) else 0.0
         except AttributeError: # Fallback for older numpy versions
             b_en = float(np.trapz(pxx[b_mask], f[b_mask]))
             w_en = float(np.trapz(pxx[w_mask], f[w_mask]))
+            h_en = float(np.trapz(pxx[h_mask], f[h_mask])) if np.any(h_mask) else 0.0
 
         return {
             "breathing_energy": b_en,
             "walking_energy": w_en,
+            "heart_energy": h_en,
             "breathing_hz": float(f[b_mask][np.argmax(pxx[b_mask])]),
             "walking_hz": float(f[w_mask][np.argmax(pxx[w_mask])]),
+            "heart_rate_bpm": float(f[h_mask][np.argmax(pxx[h_mask])]) * 60.0 if np.any(h_mask) else 0.0,
             "status": "ok"
         }
 
     def get_motion_status(self):
         current_len = len(self.rtt_history)
-        if current_len < self.config.MIN_BUFFER: return "LEARNING ENVIRONMENT...", 0.0, None, current_len / self.config.MIN_BUFFER, None
+        if current_len < self.config.MIN_BUFFER: return "LEARNING ENVIRONMENT...", 0.0, None, current_len / self.config.MIN_BUFFER, None, None, 0.0, 0.0
         jitter = max(float(np.var(self.rtt_history)), 1e-9)
         freqs = self._analyze_frequencies()
         b_energy, w_energy, b_hz, w_hz = freqs["breathing_energy"], freqs["walking_energy"], freqs["breathing_hz"], freqs["walking_hz"]
@@ -234,6 +283,11 @@ class MotionDetector:
         is_moving = w_energy > self.config.ENERGY_THRESHOLD_WALKING or jitter > self.config.JITTER_THRESHOLD_WALKING
         self.sleep_tracker.update(b_energy, b_hz, now, is_moving)
         gesture_event = self.gesture_detector.update(self.rtt_history, w_energy, b_energy, jitter)
+        
+        # Stillness check for Heart Rate
+        is_still = not is_moving and jitter < self.config.JITTER_THRESHOLD_BREATHING
+        bpm = self.heart_detector.update(freqs, is_still)
+
         if is_moving:
             self.last_activity = f"HUMAN DETECTED: WALKING ({w_hz:.1f}Hz)"
             self.confidence = min(1.0, 0.7 + (w_energy / 10.0))
@@ -243,7 +297,8 @@ class MotionDetector:
         elif jitter > self.config.JITTER_THRESHOLD_BREATHING:
             self.last_activity, self.confidence = "SCANNING: RF INTERFERENCE", 0.6
         else: self.last_activity, self.confidence = "CALM / NO MOTION", 0.9
-        return f"{self.last_activity} ({int(self.confidence*100)}%)", jitter, fall_event, 1.0, gesture_event
+        
+        return f"{self.last_activity} ({int(self.confidence*100)}%)", jitter, fall_event, 1.0, gesture_event, bpm, b_hz, w_energy
 
     def _estimate_distance_rssi(self):
         if not self.rssi_history or self.kf_rssi.x is None: return 5.0
@@ -258,6 +313,26 @@ class MotionDetector:
         d, unc = fuse_distance_estimates(self._estimate_distance_rssi(), self.config.SIGMA_RSSI, self._estimate_distance_rtt(), self.config.SIGMA_RTT)
         self.last_uncertainty = unc
         return d
+
+    def get_multi_person_status(self, rssi: float = None, rtt: float = None) -> dict:
+        """Get multi-person detection status if enabled.
+
+        Args:
+            rssi: Current RSSI value
+            rtt: Current RTT value
+
+        Returns:
+            Multi-person detection payload or empty dict if not enabled
+        """
+        if self.multi_person_detector is None:
+            return {}
+        try:
+            raw_signal = {"rssi": rssi or 0, "rtt": rtt or 0}
+            self.multi_person_detector.detect(raw_signal)
+            return self.multi_person_detector.get_output_payload()
+        except Exception as e:
+            logger.warning(f"Multi-person detection error: {e}")
+            return {}
 
 if __name__ == "__main__":
     detector = MotionDetector()

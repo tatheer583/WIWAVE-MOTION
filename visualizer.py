@@ -34,7 +34,7 @@ class WifiVisualizer:
         
         Args:
             new_signal (int): The current signal strength percentage.
-            status (str): The current motion status (CALM or MOTION).
+            status (str): The current motion status.
         """
         if new_signal is None:
             return
@@ -57,10 +57,20 @@ class WifiVisualizer:
         
         # Update status text and color
         self.status_text.set_text(f"STATUS: {status}")
-        if "MOTION" in status:
-            self.status_text.set_color('red')
+        
+        # Professional color coding
+        if "WALKING" in status:
+            self.status_text.set_color('#ff3366') # Neon Pink
+            self.line.set_color('#ff3366')
+        elif "BREATHING" in status:
+            self.status_text.set_color('#00ffcc') # Neon Green
+            self.line.set_color('#00ffcc')
+        elif "SCANNING" in status:
+            self.status_text.set_color('#ffcc00') # Yellow
+            self.line.set_color('#ffcc00')
         else:
-            self.status_text.set_color('green')
+            self.status_text.set_color('#007acc') # Default Blue
+            self.line.set_color('#007acc')
             
         # Refresh the plot
         self.fig.canvas.draw()

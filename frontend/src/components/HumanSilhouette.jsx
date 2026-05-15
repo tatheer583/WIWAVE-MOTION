@@ -6,8 +6,9 @@ import * as THREE from 'three';
  * A stylized 3D humanoid figure that represents a detected person.
  * Location targeting is simulated by moving the avatar along the Z axis 
  * based on the 'distance' prop (relative signal strength).
+ * In multi-person mode, accepts a 'position' prop for explicit placement.
  */
-const HumanSilhouette = ({ visible, distance }) => {
+const HumanSilhouette = ({ visible, distance, position }) => {
     const groupRef = useRef();
 
     useFrame((state) => {
@@ -18,10 +19,16 @@ const HumanSilhouette = ({ visible, distance }) => {
         // Target opacity
         const targetOpacity = visible ? 0.7 : 0;
         
-        // Target Position based on estimated distance (0 to 10)
-        // We'll map distance 5.0 (center) to z=0, 0.0 to z=-8, and 10.0 to z=8
-        const targetZ = (distance - 5.0) * 1.5;
-        groupRef.current.position.z = THREE.MathUtils.lerp(groupRef.current.position.z, targetZ, 0.05);
+        // If explicit position is provided (multi-person mode), use it
+        if (position) {
+            groupRef.current.position.x = THREE.MathUtils.lerp(groupRef.current.position.x, position[0], 0.05);
+            groupRef.current.position.z = THREE.MathUtils.lerp(groupRef.current.position.z, position[2], 0.05);
+        } else {
+            // Single-person mode: Target Position based on estimated distance (0 to 10)
+            // We'll map distance 5.0 (center) to z=0, 0.0 to z=-8, and 10.0 to z=8
+            const targetZ = (distance - 5.0) * 1.5;
+            groupRef.current.position.z = THREE.MathUtils.lerp(groupRef.current.position.z, targetZ, 0.05);
+        }
 
         // Breathing/Floating animation
         const hover = Math.sin(time * 2) * 0.1;
