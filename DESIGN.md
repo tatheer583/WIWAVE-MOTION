@@ -1,7 +1,7 @@
 # WiWave Motion Design Document: Intelligence Engine v4
 
 ## Overview
-WiWave Motion v3 is an experimental, privacy-first motion detection system. Unlike traditional security systems that rely on cameras or PIR sensors, WiWave utilizes **Dual-Sensor Fusion** of standard Wi-Fi signal metadata (RSSI and RTT) to detect human activity.
+WiWave Motion v4 is an experimental, privacy-first motion detection system. Unlike traditional security systems that rely on cameras or PIR sensors, WiWave utilizes **Dual-Sensor Fusion** of standard Wi-Fi signal metadata (RSSI and RTT) to detect human activity.
 
 ## How It Works: The Dual-Sensor Fusion
 WiWave treats the Wi-Fi environment as a high-resolution sensing fabric. We analyze two primary metrics:

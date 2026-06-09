@@ -4,6 +4,10 @@
 
 WiWave is an advanced, privacy-first motion detection system that transforms standard Wi-Fi signals into a high-resolution sensing fabric. Inspired by professional RF sensing systems, WiWave uses **Dual-Sensor Fusion** and **Frequency Domain Analysis** to detect human presence, walking, and even subtle breathing patterns—**no cameras, no wearables, no privacy intrusion.**
 
+## 🎥 Live Demo
+
+<video src="./assets/demo_video.mp4" width="100%" controls autoplay loop></video>
+
 ## 🚀 Key Features
 *   **Intelligence Engine v4:** Utilizes Fast Fourier Transforms (FFT) to distinguish between rhythmic walking (1.0-4.0 Hz), subtle breathing (0.1-0.5 Hz), and **micro-pulse heart rates (0.8-2.5 Hz)**.
 *   **Heart Rate Estimation:** Detects stationary human pulse using RTT jitter analysis.
@@ -15,7 +19,7 @@ WiWave is an advanced, privacy-first motion detection system that transforms sta
 ## 🛠️ Tech Stack
 *   **Core:** Python 3.10+, NumPy, SciPy (Signal Processing).
 *   **Backend:** FastAPI, WebSockets, aiosqlite, Uvicorn.
-*   **Frontend:** React, Vite, Three.js (React Three Fiber), Tailwind CSS, Framer Motion.
+*   **Frontend:** React, Vite, Three.js (React Three Fiber), Vanilla CSS, Framer Motion.
 *   **Hardware:** Standard Windows/Linux/Mac Wi-Fi adapter.
 
 ## 📦 Installation

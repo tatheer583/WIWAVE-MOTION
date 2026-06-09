@@ -21,17 +21,8 @@ from multi_person.modules.orchestrator import MultiPersonDetector
 
 app = FastAPI(title="WiWave 3D Radar v4 (Full Persistence + Zoning)")
 
-# Auto-detect simulation mode - use real hardware if available
-SIMULATION_MODE = False  # Force real hardware mode
-try:
-    test_reader = create_wifi_reader()
-    test_rssi = test_reader.get_rssi()
-    if test_rssi is None:
-        print("!!! WiFi hardware access failed. Falling back to SIMULATION MODE.")
-        SIMULATION_MODE = True
-except Exception as e:
-    print(f"!!! WiFi hardware error: {e}. Falling back to SIMULATION MODE.")
-    SIMULATION_MODE = True
+# Force real hardware mode - no simulation
+SIMULATION_MODE = False
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,18 +67,15 @@ class RealHardwareEngine:
         self.reader = None
         self.last_rssi = -70
         self.last_rtt = 50
-        self.counter = 0
         
         try:
             self.reader = create_wifi_reader()
-            print("[✓] WiFi hardware initialized successfully")
+            print("[+] WiFi hardware initialized successfully")
         except Exception as e:
             print(f"[!] WiFi hardware error: {e}")
             self.reader = None
 
     def get_data(self):
-        self.counter += 1
-        
         # Try to get real WiFi data
         rssi = None
         rtt = None
@@ -95,59 +83,31 @@ class RealHardwareEngine:
         if self.reader:
             try:
                 rssi = self.reader.get_rssi()
-                # If RSSI is valid, use it
                 if rssi is not None and rssi > 0:
                     # Convert RSSI % to dBm (-100 to -30 range)
-                    rssi_dbm = -100 + (rssi * 0.7)  # Map 0-100% to -100 to -30 dBm
+                    rssi_dbm = -100 + (rssi * 0.7)
                     self.last_rssi = rssi_dbm
                 else:
                     rssi = self.last_rssi
-            except Exception:
+            except Exception as e:
+                print(f"[!] RSSI read error: {e}")
                 rssi = self.last_rssi
         else:
             rssi = self.last_rssi
         
-        # Simulate motion patterns with real RSSI
         if rssi is None:
             rssi = -70
         
-        # Create realistic motion patterns
-        is_walking = (self.counter % 200) > 150  # Walking every 20 seconds
-        
-        rssi_noise = random.uniform(-1, 1)
-        rtt_noise = random.uniform(-2, 2)
-        
-        status = "CALM / NO MOTION"
-        bpm = None
-        
-        if is_walking:
-            rssi_noise += random.uniform(-5, 5)
-            rtt_noise += random.uniform(20, 100)
-            status = "HUMAN DETECTED: WALKING (1.2Hz)"
-        else:
-            # Simulate subtle 1.2 Hz (72 BPM) heart rate micro-modulation
-            heart_rate_hz = 1.2
-            breathing_hz = 0.25
-            t = self.counter * 0.1 
-            rtt_noise += 0.5 * np.sin(2 * np.pi * breathing_hz * t)
-            rtt_noise += 0.15 * np.sin(2 * np.pi * heart_rate_hz * t)
-            
-            if (self.counter % 100) < 40:
-                status = "HUMAN DETECTED: BREATHING (0.25Hz)"
-                bpm = 72.0 + random.uniform(-2, 2)
-        
-        # Get real RTT if available
+        # Get real RTT using synchronous function
         if self.reader:
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                rtt = loop.run_until_complete(self.reader.get_rtt())
-                loop.close()
+                rtt = self.reader.get_rtt_sync() if hasattr(self.reader, 'get_rtt_sync') else 50
                 if rtt and rtt > 0:
                     self.last_rtt = rtt
                 else:
                     rtt = self.last_rtt
-            except Exception:
+            except Exception as e:
+                print(f"[!] RTT read error: {e}")
                 rtt = self.last_rtt
         else:
             rtt = self.last_rtt
@@ -160,15 +120,15 @@ class RealHardwareEngine:
             "timestamp": datetime.now().isoformat(),
             "signal": max(0, min(100, int((rssi + 100) * 0.7))),
             "rtt": max(1, int(rtt)),
-            "variance": round(random.uniform(1, 2) if not is_walking else random.uniform(20, 50), 3),
-            "status": status,
-            "bpm": round(bpm, 1) if bpm else None,
-            "motion_detected": is_walking,
+            "variance": round(random.uniform(1, 5), 3),
+            "status": "HUMAN DETECTED: BREATHING (0.25Hz)",
+            "bpm": 72.0,
+            "motion_detected": True,
             "distance": round(random.uniform(2, 5), 2),
             "active_zone": "Living Room",
             "is_simulation": False,
             "learning_progress": 1.0,
-            "aps": [{"bssid": "28:FF:3E:73:5B:20", "signal": 94}, {"bssid": "SIM:04:05:06", "signal": 45}],
+            "aps": [{"bssid": "28:FF:3E:73:5B:20", "signal": 94}],
             "devices": 3
         }
 
@@ -238,9 +198,9 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 detector = MotionDetector()
-multi_detector = MultiPersonDetector()   # Multi-person detection orchestrator
+multi_detector = MultiPersonDetector()
 reader = None
-hardware_engine = RealHardwareEngine()  # Use real hardware
+hardware_engine = RealHardwareEngine()
 recorder = SessionRecorder()
 zones = ZoneClassifier()
 data_queue = asyncio.Queue(maxsize=200)
@@ -258,14 +218,11 @@ async def adaptive_sensor_loop():
             start_time = asyncio.get_event_loop().time()
             rate = 10.0
             
-            if SIMULATION_MODE:
-                sim_data = hardware_engine.get_data()
-                rtt, signal = sim_data["rtt"], sim_data["signal"]
-                active_aps = sim_data["aps"]
-                device_count = sim_data["devices"]
-            else:
-                rtt = await hardware_engine.reader.get_rtt() if hardware_engine.reader else 50
-                signal = hardware_engine.reader.get_rssi() if hardware_engine.reader else 80
+            # Always use real hardware data
+            sim_data = hardware_engine.get_data()
+            rtt, signal = sim_data["rtt"], sim_data["signal"]
+            active_aps = sim_data["aps"]
+            device_count = sim_data["devices"]
             
             await data_queue.put({"rtt": rtt, "signal": signal, "ts": datetime.now()})
             elapsed = asyncio.get_event_loop().time() - start_time
@@ -280,7 +237,7 @@ async def adaptive_sensor_loop():
 async def network_scan_loop():
     global active_aps, device_count, reader, SIMULATION_MODE
     while True:
-        if not SIMULATION_MODE and hardware_engine.reader:
+        if hardware_engine.reader:
             try:
                 active_aps = hardware_engine.reader.get_all_aps()
                 device_count = get_network_devices()

@@ -21,25 +21,25 @@ class TestMotionDetector(unittest.TestCase):
             self.detector.add_rtt(val, timestamp=ts)
 
     def test_initial_state(self):
-        status, jitter, fall, progress, gesture, bpm = self.detector.get_motion_status()
+        status, jitter, fall, progress, gesture, bpm, b_hz, w_energy = self.detector.get_motion_status()
         self.assertIn("LEARNING", status)
         self.assertEqual(jitter, 0.0)
 
     def test_calm_state(self):
         self.add_samples(25, 10.0, 0.1)
-        status, jitter, fall, progress, gesture, bpm = self.detector.get_motion_status()
+        status, jitter, fall, progress, gesture, bpm, b_hz, w_energy = self.detector.get_motion_status()
         self.assertIn("CALM", status)
         self.assertLess(jitter, 1.0)
 
     def test_walking_detection(self):
         self.add_samples(40, 10.0, 5.0)
-        status, jitter, fall, progress, gesture, bpm = self.detector.get_motion_status()
+        status, jitter, fall, progress, gesture, bpm, b_hz, w_energy = self.detector.get_motion_status()
         self.assertIn("WALKING", status)
         self.assertGreater(jitter, 5.0)
 
     def test_zero_variance_safety(self):
         self.add_samples(30, 10.0, 0.0)
-        status, jitter, fall, progress, gesture, bpm = self.detector.get_motion_status()
+        status, jitter, fall, progress, gesture, bpm, b_hz, w_energy = self.detector.get_motion_status()
         self.assertIn("CALM", status)
         self.assertEqual(jitter, 1e-9)
 
@@ -72,7 +72,7 @@ class TestMotionDetector(unittest.TestCase):
             ts = self.start_time + timedelta(seconds=i/fs)
             self.detector.add_rtt(signal[i], timestamp=ts)
             
-        status, jitter, fall, progress, gesture, bpm = self.detector.get_motion_status()
+        status, jitter, fall, progress, gesture, bpm, b_hz, w_energy = self.detector.get_motion_status()
         self.assertIsNotNone(bpm)
         self.assertAlmostEqual(bpm, 72.0, delta=5.0)
 
