@@ -38,7 +38,7 @@ WiWave is an advanced, privacy-first motion detection system that transforms sta
     ```
 
 3.  **Setup Frontend (Optional for Unified Mode):**
-    ```bash
+    ``bash
     cd frontend
     npm install
     npm run build
@@ -53,7 +53,7 @@ This runs the backend and serves the frontend on the same port.
 2.  **Start the server:**
     ```bash
     python server.py
-    ```
+    
 3.  **Open:** `http://localhost:8000`
 
 ### Option 2: Development Mode
