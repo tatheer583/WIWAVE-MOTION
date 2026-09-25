@@ -5,20 +5,20 @@ import * as THREE from 'three';
 /**
  * Renders glowing blobs/particles when motion is detected.
  */
-const MotionBlobs = ({ motionDetected, variance }) => {
+const MotionBlobs = ({ motionDetected }) => {
     const groupRef = useRef();
     
-    // Create a set of random positions for the blobs
+    // Deterministic illustration positions; these are not measured targets.
     const blobData = useMemo(() => {
-        return Array.from({ length: 15 }, () => ({
+        return Array.from({ length: 15 }, (_, i) => ({
             position: [
-                (Math.random() - 0.5) * 15,
-                Math.random() * 5,
-                (Math.random() - 0.5) * 15
+                Math.sin(i * 2.4) * 7.5,
+                (i % 10) / 2,
+                Math.cos(i * 1.7) * 7.5
             ],
-            speed: 0.5 + Math.random(),
-            offset: Math.random() * Math.PI * 2,
-            scale: 0.2 + Math.random() * 0.8
+            speed: 0.5 + (i % 5) * 0.2,
+            offset: i * 2.4,
+            scale: 0.2 + (i % 4) * 0.2
         }));
     }, []);
 

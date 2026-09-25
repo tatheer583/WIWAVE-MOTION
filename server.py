@@ -1,399 +1,351 @@
-import aiosqlite
-import json
+"""WiWave live sensing server. Neither RSSI nor untrained CSI identifies people."""
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import csv
+from datetime import datetime, timezone
 import io
-import re
+import json
 import os
-import random
-import numpy as np
-from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from pathlib import Path
+import time
+
+import aiosqlite
+from fastapi import FastAPI, HTTPException, Request, WebSocket, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
+from sensing.detector import ChangeDetector
+from sensing.sources import create_source
 
-from wifi_reader import create_wifi_reader, get_network_devices, HardwareError
-from motion_detector import MotionDetector
-from multi_person.modules.orchestrator import MultiPersonDetector
+ROOT = Path(__file__).resolve().parent
+DB_PATH = os.getenv('WIWAVE_DB_PATH', str(ROOT / 'wiwave_sessions.db'))
+READ_RATE = float(os.getenv('SAMPLE_RATE_HZ', '10'))
+CALIBRATION_SECONDS = float(os.getenv('WIWAVE_CALIBRATION_SECONDS', '20'))
+if not 1 <= READ_RATE <= 100 or not 5 <= CALIBRATION_SECONDS <= 120:
+    raise ValueError('SAMPLE_RATE_HZ must be 1-100; WIWAVE_CALIBRATION_SECONDS must be 5-120')
+ORIGINS = ['http://localhost:8000', 'http://127.0.0.1:8000', 'http://localhost:5173', 'http://127.0.0.1:5173']
+ORIGINS += [x.strip() for x in os.getenv('WIWAVE_ALLOWED_ORIGINS', '').split(',') if x.strip()]
 
-app = FastAPI(title="WiWave 3D Radar v4 (Full Persistence + Zoning)")
 
-# Force real hardware mode - no simulation
-SIMULATION_MODE = False
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# --- MODELS ---
-class ZoneMap(BaseModel):
-    mappings: dict[str, str] # Room Name -> BSSID
+class Runtime:
+    def __init__(self, source):
+        self.source = source
+        self.detector = ChangeDetector(CALIBRATION_SECONDS)
+        self.last_received = None
+        self.latest = {}
+        self.error = None
+        self.sequence = 0
+        self.invalid_frames = 0
+        self.subscribers = set()
+        self.session_id = None
+        self.recording_error = None
+        self.db_lock = asyncio.Lock()
+        self.started = utc_now()
 
-# --- DATABASE SETUP ---
-DB_PATH = "wiwave_sessions.db"
+    def snapshot(self):
+        age = time.monotonic() - self.last_received if self.last_received is not None else None
+        fresh = age is not None and age < 3 and self.error is None
+        state = self.latest.get('state', 'waiting') if fresh else 'disconnected' if self.error else 'stale' if age is not None else 'waiting'
+        result = {'type': 'radar_update', 'sequence': self.sequence, 'timestamp': None,
+                  'signal': None, 'rssi_dbm': None, 'rtt': None, 'variance': 0,
+                  'learning_progress': 0, 'change_score': 0, 'motion_detected': False,
+                  'read_rate_hz': 0, 'event_count': 0, **self.latest}
+        result.update({
+            'state': state, 'status': state.replace('_', ' ').upper(),
+            'system_status': 'ok' if fresh else state, 'source': self.source.source,
+            'is_simulation': self.source.source == 'simulation',
+            'sample_age_ms': round(age * 1000) if age is not None else None,
+            'error': self.error, 'invalid_frames': self.invalid_frames,
+            'distance': None, 'bpm': None, 'person_count': None, 'persons': [],
+            'multi_person_mode': 'unavailable', 'active_zone': 'Unknown',
+            'capabilities': {'signal_monitoring': self.source.source != 'unavailable',
+                             'csi': self.source.source == 'esp32_csi', 'human_detection': False,
+                             'person_count': False, 'localization': False,
+                             'object_classification': False, 'vital_signs': False},
+            'recording': self.session_id is not None, 'session_id': self.session_id,
+            'recording_error': self.recording_error,
+        })
+        if not fresh:
+            result.update(motion_detected=False, change_score=0, read_rate_hz=0, signal=None, rssi_dbm=None)
+        return result
+
+    async def acquire(self):
+        while True:
+            tick = time.monotonic()
+            try:
+                sample = await asyncio.to_thread(self.source.read)
+                if sample is not None:
+                    now = time.monotonic()
+                    detection = self.detector.update(sample, now)
+                    self.sequence += 1
+                    self.latest = {k: v for k, v in sample.items() if k != 'amplitudes'}
+                    self.latest.update(detection, sequence=self.sequence, timestamp=utc_now())
+                    self.last_received = now
+                    self.error = None
+            except ValueError as exc:
+                self.invalid_frames += 1
+                self.error = str(exc)
+            except Exception as exc:
+                self.error = str(exc)
+                self.detector.reset()
+                with suppress(Exception):
+                    await asyncio.to_thread(self.source.close)
+                await asyncio.sleep(1)
+            delay = 0 if self.source.source == 'esp32_csi' else max(0, 1 / READ_RATE - (time.monotonic() - tick))
+            await asyncio.sleep(delay)
+
+    async def publish(self):
+        while True:
+            message = json.dumps(self.snapshot(), allow_nan=False)
+            for queue in tuple(self.subscribers):
+                if queue.full():
+                    queue.get_nowait()
+                queue.put_nowait(message)
+            await asyncio.sleep(0.1)
+
+    async def record(self):
+        last_sequence = -1
+        while True:
+            await asyncio.sleep(0.2)
+            async with self.db_lock:
+                payload = self.snapshot()
+                if self.session_id is None or payload['system_status'] != 'ok' or payload['sequence'] == last_sequence:
+                    continue
+                try:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute('INSERT INTO sensing_telemetry (session_id,timestamp,payload) VALUES (?,?,?)',
+                                         (self.session_id, payload['timestamp'], json.dumps(payload, allow_nan=False)))
+                        await db.commit()
+                    last_sequence = payload['sequence']
+                    self.recording_error = None
+                except Exception as exc:
+                    self.recording_error = str(exc)
+
 
 async def init_db():
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    start_time TEXT, end_time TEXT, name TEXT
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS telemetry (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER,
-                    timestamp TEXT, rssi REAL, rtt REAL, breathing_hz REAL,
-                    walking_energy REAL, status TEXT, active_zone TEXT,
-                    FOREIGN KEY(session_id) REFERENCES sessions(id)
-                )
-            """)
-            await db.commit()
-    except Exception as e:
-        print(f"Database initialization skipped (possibly read-only FS): {e}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, start_time TEXT, end_time TEXT, name TEXT)')
+        await db.execute('CREATE TABLE IF NOT EXISTS sensing_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, timestamp TEXT, payload TEXT, FOREIGN KEY(session_id) REFERENCES sessions(id))')
+        await db.execute('CREATE INDEX IF NOT EXISTS sensing_session_idx ON sensing_telemetry(session_id)')
+        await db.commit()
 
-# --- REAL HARDWARE SENSOR ENGINE ---
-class RealHardwareEngine:
-    """Uses actual WiFi hardware for motion detection."""
-    def __init__(self):
-        self.reader = None
-        self.last_rssi = -70
-        self.last_rtt = 50
-        
-        try:
-            self.reader = create_wifi_reader()
-            print("[+] WiFi hardware initialized successfully")
-        except Exception as e:
-            print(f"[!] WiFi hardware error: {e}")
-            self.reader = None
 
-    def get_data(self):
-        # Try to get real WiFi data
-        rssi = None
-        rtt = None
-        
-        if self.reader:
-            try:
-                rssi = self.reader.get_rssi()
-                if rssi is not None and rssi > 0:
-                    # Convert RSSI % to dBm (-100 to -30 range)
-                    rssi_dbm = -100 + (rssi * 0.7)
-                    self.last_rssi = rssi_dbm
-                else:
-                    rssi = self.last_rssi
-            except Exception as e:
-                print(f"[!] RSSI read error: {e}")
-                rssi = self.last_rssi
-        else:
-            rssi = self.last_rssi
-        
-        if rssi is None:
-            rssi = -70
-        
-        # Get real RTT using synchronous function
-        if self.reader:
-            try:
-                rtt = self.reader.get_rtt_sync() if hasattr(self.reader, 'get_rtt_sync') else 50
-                if rtt and rtt > 0:
-                    self.last_rtt = rtt
-                else:
-                    rtt = self.last_rtt
-            except Exception as e:
-                print(f"[!] RTT read error: {e}")
-                rtt = self.last_rtt
-        else:
-            rtt = self.last_rtt
-        
-        if rtt is None:
-            rtt = 50
-        
-        return {
-            "type": "radar_update",
-            "timestamp": datetime.now().isoformat(),
-            "signal": max(0, min(100, int((rssi + 100) * 0.7))),
-            "rtt": max(1, int(rtt)),
-            "variance": round(random.uniform(1, 5), 3),
-            "status": "HUMAN DETECTED: BREATHING (0.25Hz)",
-            "bpm": 72.0,
-            "motion_detected": True,
-            "distance": round(random.uniform(2, 5), 2),
-            "active_zone": "Living Room",
-            "is_simulation": False,
-            "learning_progress": 1.0,
-            "aps": [{"bssid": "28:FF:3E:73:5B:20", "signal": 94}],
-            "devices": 3
-        }
-
-# --- ZONE CLASSIFIER ---
-class ZoneClassifier:
-    def __init__(self):
-        self.mappings = {}
-
-    def update_mappings(self, new_map: dict[str, str]):
-        self.mappings = {bssid.upper(): room for room, bssid in new_map.items()}
-
-    def get_zone(self, visible_aps: list[dict]):
-        if not visible_aps: return "Unknown"
-        sorted_aps = sorted(visible_aps, key=lambda x: x["signal"], reverse=True)
-        for ap in sorted_aps:
-            bssid = ap["bssid"].upper()
-            if bssid in self.mappings:
-                return self.mappings[bssid]
-        return "Unknown"
-
-# --- SESSION RECORDER ---
-class SessionRecorder:
-    def __init__(self):
-        self.current_session_id = None
-        self.is_recording = False
-
-    async def start(self, name: str = None):
-        async with aiosqlite.connect(DB_PATH) as db:
-            now = datetime.now().isoformat()
-            cursor = await db.execute("INSERT INTO sessions (start_time, name) VALUES (?, ?)", (now, name or f"Session {now}"))
-            self.current_session_id = cursor.lastrowid
-            await db.commit()
-        self.is_recording = True
-        return self.current_session_id
-
-    async def stop(self):
-        if not self.is_recording: return
-        async with aiosqlite.connect(DB_PATH) as db:
-            now = datetime.now().isoformat()
-            await db.execute("UPDATE sessions SET end_time = ? WHERE id = ?", (now, self.current_session_id))
-            await db.commit()
-        self.is_recording = False
-        self.current_session_id = None
-
-    async def log(self, payload: dict, breathing_hz: float, walking_energy: float):
-        if not self.is_recording: return
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO telemetry (session_id, timestamp, rssi, rtt, breathing_hz, walking_energy, status, active_zone)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (self.current_session_id, payload["timestamp"], payload["signal"], payload["rtt"], breathing_hz, walking_energy, payload["status"], payload["active_zone"]))
-            await db.commit()
-
-# --- APP STATE ---
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections: self.active_connections.remove(websocket)
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try: await connection.send_text(message)
-            except: pass
-
-manager = ConnectionManager()
-detector = MotionDetector()
-multi_detector = MultiPersonDetector()
-reader = None
-hardware_engine = RealHardwareEngine()
-recorder = SessionRecorder()
-zones = ZoneClassifier()
-data_queue = asyncio.Queue(maxsize=200)
-device_count = 0
-is_motion_active = False
-active_aps = []
-latest_payload = {}
-
-# --- SENSOR LOOPS ---
-async def adaptive_sensor_loop():
-    global is_motion_active, reader, SIMULATION_MODE, active_aps, device_count
-    
-    while True:
-        try:
-            start_time = asyncio.get_event_loop().time()
-            rate = 10.0
-            
-            # Always use real hardware data
-            sim_data = hardware_engine.get_data()
-            rtt, signal = sim_data["rtt"], sim_data["signal"]
-            active_aps = sim_data["aps"]
-            device_count = sim_data["devices"]
-            
-            await data_queue.put({"rtt": rtt, "signal": signal, "ts": datetime.now()})
-            elapsed = asyncio.get_event_loop().time() - start_time
-            await asyncio.sleep(max(0, (1.0/rate) - elapsed))
-        except HardwareError:
-            await manager.broadcast(json.dumps({"type": "system_status", "status": "hw_disconnected"}))
-            await asyncio.sleep(5)
-        except Exception as e:
-            print(f"Sensor Loop Error: {e}")
-            await asyncio.sleep(1)
-
-async def network_scan_loop():
-    global active_aps, device_count, reader, SIMULATION_MODE
-    while True:
-        if hardware_engine.reader:
-            try:
-                active_aps = hardware_engine.reader.get_all_aps()
-                device_count = get_network_devices()
-            except: pass
-        await asyncio.sleep(10)
-
-async def processing_loop():
-    global is_motion_active, latest_payload
-    consecutive_none_count = 0
-    while True:
-        data = await data_queue.get()
-        rtt, signal, ts = data["rtt"], data["signal"], data["ts"]
-        if rtt is None:
-            consecutive_none_count += 1
-            if consecutive_none_count == 30:
-                detector.reset_rtt_state()
-                await manager.broadcast(json.dumps({"type": "system_status", "status": "no_signal"}))
-        else:
-            consecutive_none_count = 0
-            detector.add_rtt(rtt, timestamp=ts)
-        detector.add_rssi(signal)
-        status, jitter, fall_event, learn_progress, gesture_event, bpm, b_hz, w_energy = detector.get_motion_status()
-        distance = detector.get_estimated_distance()
-        is_motion_active = "DETECTED" in status
-        active_zone = zones.get_zone(active_aps)
-
-        # --- Multi-person detection ---
-        raw_signal = {"rssi": signal or 0, "rtt": rtt or 0, "timestamp": ts.isoformat()}
-        mp_result = multi_detector.detect(raw_signal)
-        mp_payload = multi_detector.get_output_payload()
-
-        payload = {
-            "type": "radar_update", "timestamp": ts.isoformat(),
-            "active_zone": active_zone, "signal": signal or 0, "rtt": rtt or 0,
-            "variance": round(jitter, 3), "status": "NO SIGNAL" if consecutive_none_count >= 30 else status,
-            "learning_progress": round(learn_progress, 2), "motion_detected": is_motion_active,
-            "distance": round(distance, 2),
-            "bpm": round(bpm, 1) if bpm else None,
-            "is_simulation": SIMULATION_MODE,
-            # Multi-person fields
-            "person_count": mp_payload.get("person_count", 1),
-            "persons": mp_payload.get("persons", []),
-            "zone_congestion": mp_payload.get("zone_congestion", {}),
-            "multi_person_mode": mp_payload.get("mode", "single_person"),
-        }
-        latest_payload = payload
-        await manager.broadcast(json.dumps(payload))
-
-        # Broadcast multi-person update separately for clients that want it
-        if mp_payload.get("person_count", 0) > 1:
-            await manager.broadcast(json.dumps({
-                "type": "multi_person_update",
-                **mp_payload
-            }))
-
-        # Handle Fall Alert
-        if fall_event:
-            print(f"[!!!] FALL DETECTED (Confidence: {fall_event.confidence:.2f})")
-            alert_payload = {
-                "type": "fall_alert",
-                "confidence": round(fall_event.confidence, 2),
-                "timestamp": fall_event.timestamp.isoformat()
-            }
-            await manager.broadcast(json.dumps(alert_payload))
-            
-        # Handle Gesture Event
-        if gesture_event:
-            await manager.broadcast(json.dumps({
-                "type": "gesture",
-                "gesture": gesture_event.type,
-                "confidence": round(gesture_event.confidence, 2)
-            }))
-            
-        if recorder.is_recording: await recorder.log(payload, b_hz, w_energy)
-        data_queue.task_done()
-
-# --- API ENDPOINTS ---
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app):
     await init_db()
-    asyncio.create_task(adaptive_sensor_loop())
-    asyncio.create_task(processing_loop())
-    asyncio.create_task(network_scan_loop())
+    runtime = Runtime(create_source())
+    app.state.runtime = runtime
+    tasks = [asyncio.create_task(runtime.acquire()), asyncio.create_task(runtime.publish()), asyncio.create_task(runtime.record())]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(runtime.source.close)
+        if runtime.session_id is not None:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute('UPDATE sessions SET end_time=? WHERE id=?', (utc_now(), runtime.session_id))
+                await db.commit()
 
-@app.post("/zones")
+
+app = FastAPI(title='WiWave Live Sensing', version='5.0.0', lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=['GET', 'POST'], allow_headers=['Content-Type'])
+
+
+@app.middleware('http')
+async def control_origin(request: Request, call_next):
+    origin = request.headers.get('origin')
+    own_origin = str(request.base_url).rstrip('/')
+    if request.method == 'POST' and origin and origin not in ORIGINS and origin != own_origin:
+        return JSONResponse({'detail': 'Origin not allowed'}, status_code=403)
+    return await call_next(request)
+
+
+@app.get('/api/health')
+async def health():
+    runtime = app.state.runtime
+    snapshot = runtime.snapshot()
+    return {'status': 'ok' if snapshot['system_status'] == 'ok' else 'degraded',
+            'version': '5.0.0', 'engine': runtime.source.source,
+            'is_simulation': snapshot['is_simulation'], 'sensor_state': snapshot['state'],
+            'sample_age_ms': snapshot['sample_age_ms'], 'read_rate_hz': snapshot['read_rate_hz'],
+            'started_at': runtime.started, 'has_payload': runtime.sequence > 0,
+            'ws_clients': len(runtime.subscribers), 'error': runtime.error}
+
+
+@app.get('/api/poll')
+async def poll_data():
+    return app.state.runtime.snapshot()
+
+
+@app.get('/api/capabilities')
+async def capabilities():
+    return app.state.runtime.snapshot()['capabilities']
+
+
+@app.post('/api/calibrate')
+async def calibrate():
+    runtime = app.state.runtime
+    runtime.detector.reset()
+    runtime.latest.update(state='calibrating', learning_progress=0, motion_detected=False,
+                          change_score=0, event_count=0, baseline_rssi_dbm=None)
+    return {'message': 'Calibration restarted. Keep the room quiet and the receiver stationary.', 'seconds': CALIBRATION_SECONDS}
+
+
+@app.get('/api/multi-person/stats')
+async def multi_person_stats():
+    return {'supported': False, 'person_count': None, 'reason': 'No validated person-count model is connected.'}
+
+
+class ZoneMap(BaseModel):
+    mappings: dict[str, str] = Field(default_factory=dict)
+
+
+@app.post('/zones')
 async def update_zones(zone_map: ZoneMap):
-    zones.update_mappings(zone_map.mappings)
-    return {"message": "Zone mappings updated", "active_zones": list(zone_map.mappings.keys())}
+    app.state.zone_mappings = zone_map.mappings
+    return {'message': 'Access point labels saved for this run; person localization is unavailable.', 'active_zones': list(zone_map.mappings)}
 
-@app.post("/session/start")
-async def start_session(name: str = None):
-    session_id = await recorder.start(name)
-    return {"message": "Recording started", "session_id": session_id}
 
-@app.post("/session/stop")
+@app.post('/session/start')
+async def start_session(name: str = 'Live sensing session'):
+    runtime = app.state.runtime
+    async with runtime.db_lock:
+        if runtime.session_id is not None:
+            raise HTTPException(409, 'A session is already recording')
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute('INSERT INTO sessions (start_time,name) VALUES (?,?)', (utc_now(), name[:200]))
+            await db.commit()
+            runtime.session_id = cursor.lastrowid
+    return {'message': 'Recording started', 'session_id': runtime.session_id}
+
+
+@app.post('/session/stop')
 async def stop_session():
-    await recorder.stop()
-    return {"message": "Recording stopped"}
+    runtime = app.state.runtime
+    async with runtime.db_lock:
+        if runtime.session_id is not None:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute('UPDATE sessions SET end_time=? WHERE id=?', (utc_now(), runtime.session_id))
+                await db.commit()
+            runtime.session_id = None
+    return {'message': 'Recording stopped'}
 
-@app.get("/sessions")
-async def get_sessions():
+
+@app.get('/sessions')
+async def sessions():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM sessions ORDER BY id DESC")
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        async with db.execute('SELECT * FROM sessions ORDER BY id DESC LIMIT 200') as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
 
-@app.get("/session/{session_id}/export")
+
+@app.get('/session/{session_id}/export')
 async def export_session(session_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM telemetry WHERE session_id = ?", (session_id,))
-        rows = await cursor.fetchall()
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=["id", "session_id", "timestamp", "rssi", "rtt", "breathing_hz", "walking_energy", "status", "active_zone"])
-        writer.writeheader()
-        writer.writerows([dict(row) for row in rows])
-        return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=wiwave_session_{session_id}.csv"})
+        async with db.execute('SELECT id FROM sessions WHERE id=?', (session_id,)) as cursor:
+            if await cursor.fetchone() is None:
+                raise HTTPException(404, 'Session not found')
+        async with db.execute('SELECT 1 FROM sensing_telemetry WHERE session_id=? LIMIT 1', (session_id,)) as cursor:
+            has_new_data = await cursor.fetchone() is not None
+        async with db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telemetry'") as cursor:
+            legacy_table_exists = await cursor.fetchone() is not None
+        # Preserve CSV exports from pre-v5 sessions without altering their rows.
+        if not has_new_data and legacy_table_exists:
+            async with db.execute('SELECT * FROM telemetry WHERE session_id=? ORDER BY id', (session_id,)) as cursor:
+                legacy_rows = await cursor.fetchall()
+                if legacy_rows:
+                    output = io.StringIO()
+                    writer = csv.writer(output)
+                    writer.writerow([column[0] for column in cursor.description])
+                    writer.writerows(legacy_rows)
+                    return StreamingResponse(iter([output.getvalue()]), media_type='text/csv',
+                                             headers={'Content-Disposition': f'attachment; filename=wiwave_session_{session_id}.csv'})
+    async def rows():
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT timestamp,payload FROM sensing_telemetry WHERE session_id=? ORDER BY id', (session_id,)) as cursor:
+                buffer = io.StringIO()
+                writer = csv.writer(buffer)
+                writer.writerow(['timestamp', 'source', 'rssi_dbm', 'state', 'change_score', 'read_rate_hz', 'is_simulation'])
+                yield buffer.getvalue()
+                async for ts, raw in cursor:
+                    payload = json.loads(raw)
+                    buffer.seek(0)
+                    buffer.truncate(0)
+                    writer.writerow([ts] + [payload.get(key) for key in ['source', 'rssi_dbm', 'state', 'change_score', 'read_rate_hz', 'is_simulation']])
+                    yield buffer.getvalue()
+    return StreamingResponse(rows(), media_type='text/csv', headers={'Content-Disposition': f'attachment; filename=wiwave_session_{session_id}.csv'})
 
-@app.get("/api/poll")
-async def poll_data():
-    """Stateless endpoint for serverless environments"""
-    if latest_payload:
-        return latest_payload
-    return {"signal": 0, "rtt": 0, "status": "INITIALIZING...", "is_simulation": False}
 
-@app.get("/api/multi-person/stats")
-async def get_multi_person_stats():
-    """Get multi-person detection statistics."""
-    return multi_detector.get_detection_stats()
+@app.get('/session/{session_id}/frames')
+async def session_frames(session_id: int, limit: int = Query(10000, ge=1, le=10000)):
+    """Bounded replay of recorded snapshots, preserving original provenance."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT id FROM sessions WHERE id=?', (session_id,)) as cursor:
+            if await cursor.fetchone() is None:
+                raise HTTPException(404, 'Session not found')
+        async with db.execute('SELECT payload FROM sensing_telemetry WHERE session_id=? ORDER BY id LIMIT ?', (session_id, limit + 1)) as cursor:
+            rows = await cursor.fetchall()
+    return {'session_id': session_id, 'frames': [json.loads(row[0]) for row in rows[:limit]],
+            'truncated': len(rows) > limit, 'is_replay': True}
 
-@app.websocket("/ws/radar")
+
+@app.websocket('/ws/radar')
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    origin = websocket.headers.get('origin')
+    own_origins = {f'http://{websocket.headers.get("host")}', f'https://{websocket.headers.get("host")}'}
+    if origin and origin not in ORIGINS and origin not in own_origins:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    runtime = app.state.runtime
+    queue = asyncio.Queue(maxsize=1)
+    runtime.subscribers.add(queue)
+
+    async def send():
+        await websocket.send_json(runtime.snapshot())
+        while True:
+            await asyncio.wait_for(websocket.send_text(await queue.get()), timeout=2)
+
+    async def receive():
+        while True:
+            await websocket.receive_text()
+
+    sender, receiver = asyncio.create_task(send()), asyncio.create_task(receive())
     try:
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect: manager.disconnect(websocket)
+        await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        runtime.subscribers.discard(queue)
+        for task in (sender, receiver):
+            task.cancel()
+        await asyncio.gather(sender, receiver, return_exceptions=True)
+        with suppress(Exception):
+            await websocket.close()
 
-# --- STATIC FILES (FRONTEND) ---
-frontend_path = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 
-if os.path.exists(frontend_path):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_path, "assets")), name="assets")
+frontend = ROOT / 'frontend' / 'dist'
+if (frontend / 'assets').is_dir():
+    app.mount('/assets', StaticFiles(directory=frontend / 'assets'), name='assets')
 
-    @app.get("/{full_path:path}")
-    async def serve_frontend(full_path: str):
-        file_path = os.path.join(frontend_path, full_path)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_path, "index.html"))
-else:
-    @app.get("/")
-    async def root():
-        return {"message": "WiWave API is running. Build the frontend to see the dashboard."}
 
-if __name__ == "__main__":
-    is_dev = os.getenv("ENVIRONMENT", "dev").lower() == "dev"
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=is_dev)
+@app.get('/{path:path}')
+async def frontend_page(path: str):
+    if path.startswith(('api/', 'session/', 'ws/')):
+        raise HTTPException(404)
+    if not (frontend / 'index.html').exists():
+        return {'message': 'WiWave API is running. Build frontend with npm run build.', 'health': '/api/health'}
+    candidate = (frontend / path).resolve()
+    if not candidate.is_relative_to(frontend.resolve()):
+        raise HTTPException(404)
+    return FileResponse(candidate if path and candidate.is_file() else frontend / 'index.html')
+
+
+if __name__ == '__main__':
+    uvicorn.run('server:app', host=os.getenv('WIWAVE_HOST', '127.0.0.1'), port=int(os.getenv('PORT', '8000')), reload=False)

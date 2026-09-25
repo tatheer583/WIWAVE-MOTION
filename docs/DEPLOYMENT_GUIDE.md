@@ -1,4 +1,11 @@
-# WiWave Deployment Guide
+# v5 deployment update
+
+Use [LIVE_SENSING_GUIDE.md](LIVE_SENSING_GUIDE.md) for current configuration.
+v5 binds to `127.0.0.1` by default; the cloud demo sets `WIWAVE_HOST=0.0.0.0`.
+`AUTO_SIM_FALLBACK` no longer enables synthetic data. Set `SIMULATION_MODE=true`
+explicitly for a demo. The material below is retained as historical v4 guidance.
+
+# Historical WiWave Deployment Guide
 
 ## Architecture overview
 
@@ -71,13 +78,24 @@ cd ..
 
 ```bash
 # Simulation mode (no Wi-Fi hardware needed)
-set SIMULATION_MODE=true        # Windows CMD
-# export SIMULATION_MODE=true   # Linux / macOS
+# Windows PowerShell:
+$env:SIMULATION_MODE="true"
+$env:ENVIRONMENT="production"
+# Windows CMD: set SIMULATION_MODE=true
+# Linux / macOS: export SIMULATION_MODE=true
 
 python server.py
 ```
 
 Open `http://localhost:8000` in your browser.
+
+Verify: `http://localhost:8000/api/health` should show `"is_simulation": true`.
+
+Smoke test:
+
+```bash
+python scripts/live_test.py
+```
 
 ### 4 — Run tests
 

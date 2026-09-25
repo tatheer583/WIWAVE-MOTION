@@ -1,0 +1,3 @@
+# Optional serial receiver support; core laptop mode does not require this.
+-r requirements.txt
+pyserial>=3.5,<4

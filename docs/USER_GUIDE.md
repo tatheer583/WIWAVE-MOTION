@@ -1,4 +1,10 @@
-# WiWave Multi-Person Detection — User Guide
+# v5 live sensing update
+
+Use [LIVE_SENSING_GUIDE.md](LIVE_SENSING_GUIDE.md) for the current application.
+The material below describes the historical v4 research interface; its human,
+range, gesture, and vital-sign claims are not capabilities of the v5 live monitor.
+
+# Historical WiWave Multi-Person Detection — User Guide
 
 ## What it does
 
@@ -64,8 +70,11 @@ All configuration is done through environment variables or by editing
 | Variable | Default | Description |
 |---|---|---|
 | `SIMULATION_MODE` | `false` | Force simulation (no real Wi-Fi hardware) |
+| `AUTO_SIM_FALLBACK` | `true` | If hardware fails at startup, use simulation |
 | `PORT` | `8000` | HTTP / WebSocket port |
-| `ENVIRONMENT` | `dev` | Set to `prod` to disable hot-reload |
+| `ENVIRONMENT` | `dev` | Set to `production` to disable hot-reload |
+| `SAMPLE_RATE_HZ` | `10` | Sensor sample rate |
+| `MULTI_PERSON_EVERY_N` | `2` | Run multi-person every N frames |
 
 ### Multi-person detector options
 

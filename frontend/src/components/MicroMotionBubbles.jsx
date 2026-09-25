@@ -10,10 +10,10 @@ const MicroMotionBubbles = ({ jitter }) => {
     
     const count = 30;
     const particles = useMemo(() => {
-        return Array.from({ length: count }, () => ({
-            position: [(Math.random() - 0.5) * 10, Math.random() * 5, (Math.random() - 0.5) * 10],
-            speed: 0.1 + Math.random() * 0.2,
-            factor: 2 + Math.random() * 4
+        return Array.from({ length: count }, (_, i) => ({
+            position: [Math.sin(i * 2.4) * 5, (i % 10) / 2, Math.cos(i * 1.7) * 5],
+            speed: 0.1 + (i % 5) * 0.04,
+            factor: 2 + (i % 7) * 0.5
         }));
     }, []);
 

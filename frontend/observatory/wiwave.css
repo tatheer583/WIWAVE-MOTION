@@ -1,0 +1,47 @@
+[hidden] { display: none !important; }
+button, select, input, a { touch-action: manipulation; }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #51edb8; outline-offset: 3px; }
+#mode-toolbar { position: fixed; z-index: 15; top: 82px; left: 24px; right: 24px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; pointer-events: auto; }
+#mode-toolbar button, #mode-toolbar a, .workspace-dialog button, .session-row a, #playback-bar button, #playback-bar select { font: 12px 'Segoe UI', sans-serif; color: #bcd3ca; border: 1px solid #31554b; background: #0c191eee; border-radius: 6px; padding: 9px 13px; cursor: pointer; text-decoration: none; }
+#mode-toolbar .active, .workspace-dialog button.active { background: #184336; color: #6af3b0; border-color: #49bc8a; }
+button:disabled { opacity: .4; cursor: not-allowed !important; }
+#source-note { position: fixed; left: 24px; right: 24px; top: 130px; color: #a1b9bb; max-width: 760px; font: 11px/1.5 'Segoe UI', sans-serif; text-shadow: 0 1px 4px #000; }
+#data-source-badge { white-space: nowrap; font: 10px 'Segoe UI', sans-serif; padding: 6px 10px; border: 1px solid #31554b; }
+#data-source-badge[data-mode="demo"] { color: #ffce7b; border-color: #80622f; }
+#data-source-badge[data-mode="offline"] { color: #e7ad9b; }
+.workspace-overlay { position: fixed; inset: 0; z-index: 200; background: #02070bc9; backdrop-filter: blur(12px); display: grid; place-items: center; padding: 24px; }
+.workspace-dialog { width: min(900px, 100%); max-height: 88vh; overflow: auto; color: #d5e7e4; background: #091318; border: 1px solid #29483e; border-radius: 14px; box-shadow: 0 30px 100px #0009; font: 14px/1.6 'Segoe UI', sans-serif; }
+.workspace-dialog header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid #1f3931; }
+.workspace-dialog h2 { margin: 0; font-size: 19px; font-weight: 500; }
+#workspace-tabs { display: flex; gap: 8px; flex-wrap: wrap; padding: 18px 24px 0; }
+#workspace-content { padding: 12px 24px 20px; min-height: 270px; }
+#workspace-notice { margin: 0 24px 20px; color: #ffc980; }
+.workspace-intro { font-size: 17px; color: #e4f1ed; }
+.workspace-muted { color: #8ca7a2; font-size: 12px; }
+.workspace-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+.workspace-metrics > div { padding: 16px; border: 1px solid #203f34; border-radius: 8px; color: #91a9a0; font-size: 12px; }
+.workspace-metrics strong { display: block; font-size: 20px; font-weight: 500; color: #66e5ab; }
+.workspace-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.session-row { display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #22352e; padding: 14px 0; }
+.session-row span { flex: 1; overflow-wrap: anywhere; font-size: 12px; }
+.device-row { border: 1px solid #254035; margin: 10px 0; padding: 16px; border-radius: 7px; }
+.research-links { display: grid; gap: 10px; margin: 24px 0; }
+.research-links a { color: #6fe3ba; text-decoration: none; }
+.feature-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+.feature-table td, .feature-table th { border-bottom: 1px solid #263b34; padding: 12px 8px; }
+.feature-table td:last-child { color: #a1c9b8; }
+#playback-bar { position: fixed; z-index: 30; bottom: 90px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; width: min(800px, 90vw); padding: 14px; background: #0b1b20ee; border: 1px solid #35675a; border-radius: 10px; color: #bad8ce; font: 12px 'Segoe UI', sans-serif; }
+#playback-seek { flex: 1; min-width: 50px; accent-color: #59e6a8; }
+.attribution { position: fixed; bottom: 5px; left: 24px; z-index: 25; font: 10px 'Segoe UI', sans-serif; color: #839b92; }
+.attribution a { color: #9bb8ab; }
+.webgl-error { position: fixed; inset: 25% 10%; z-index: 300; padding: 30px; background: #0b171e; color: #e6eee8; border: 1px solid #426c5c; font: 16px/1.7 'Segoe UI', sans-serif; }
+.webgl-error a { display: block; color: #7aebbb; margin-top: 20px; }
+@media (max-width: 760px) {
+  #mode-toolbar { top: 68px; left: 12px; right: 12px; gap: 5px; }
+  #mode-toolbar button, #mode-toolbar a { font-size: 10px; padding: 7px; }
+  #source-note { top: 147px; left: 12px; right: 12px; font-size: 10px; }
+  .workspace-overlay { padding: 10px; }
+  .workspace-metrics { grid-template-columns: repeat(2, 1fr); }
+  #playback-bar { flex-wrap: wrap; bottom: 65px; gap: 8px; }
+  .feature-table { font-size: 11px; }
+}
