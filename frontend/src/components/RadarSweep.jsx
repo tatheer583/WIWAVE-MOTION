@@ -8,7 +8,7 @@ import * as THREE from 'three';
 const RadarSweep = () => {
     const sweepRef = useRef();
 
-    useFrame((state) => {
+    useFrame(() => {
         if (!sweepRef.current) return;
         sweepRef.current.rotation.y += 0.03;
     });

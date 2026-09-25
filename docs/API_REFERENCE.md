@@ -1,5 +1,10 @@
 # WiWave API Reference
 
+> Historical pre-v5 API documentation. The live server's current routes are listed
+> in [README](../README.md#api) and its interactive schema at `/docs`.
+> Legacy multi-person, position and vital-sign claims below do not describe the
+> current live pipeline. See [project status](PROJECT_STATUS.md).
+
 ## Base URL
 
 ```

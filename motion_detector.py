@@ -232,12 +232,19 @@ class MotionDetector:
             return fallback
             
         try:
-            assert actual_fs > 2 * self.config.FILTER_HIGH, f"FS {actual_fs:.2f}Hz <= Nyquist requirement"
-            sos = build_bandpass_filter(self.config.FILTER_LOW, self.config.FILTER_HIGH, actual_fs)
+            # Adapt high-cut to measured sample rate so Nyquist is always respected
+            # (event-loop jitter can make actual_fs < configured sample_rate).
+            max_high = min(self.config.FILTER_HIGH, 0.45 * actual_fs)
+            low_hz = min(self.config.FILTER_LOW, max_high * 0.5)
+            if max_high <= low_hz or actual_fs < 1.0:
+                raise AssertionError(
+                    f"FS {actual_fs:.2f}Hz too low for bandpass (high={max_high:.2f})"
+                )
+            sos = build_bandpass_filter(low_hz, max_high, actual_fs)
             validate_filter_stability(sos, actual_fs)
             processed_data = sosfilt(sos, raw_data)
         except (AssertionError, FilterError) as e:
-            logger.warning(f"Bypassing filter: {e}")
+            logger.debug(f"Bypassing filter: {e}")
             processed_data = raw_data - np.mean(raw_data)
         except Exception as e:
             logger.error(f"Filter design error: {e}. Bypassing.")

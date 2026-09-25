@@ -1,180 +1,126 @@
-import React from 'react';
+import { useEffect, useState } from 'react';
+import { Activity, ArrowDownToLine, Circle, Cpu, Radio, RotateCcw, Wifi, Waves } from 'lucide-react';
 import { useRadarWebSocket } from './hooks/useRadarWebSocket';
-import RadarScene from './components/RadarScene';
-import MultiPersonPanel from './components/MultiPersonPanel';
-import { Activity, Wifi, Zap, AlertTriangle, ShieldCheck, HardDrive, Target, Cpu, MapPin, Loader2, Hand, Heart } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
 import './App.css';
 
-function App() {
-    const { 
-        signal, rtt, variance, status, motionDetected, isConnected, 
-        deviceCount, distance, learningProgress, isLearning, activeZone, 
-        systemStatus, alerts, bpm,
-        multiPersonMode, personCount, persons, zoneCongestion
-    } = useRadarWebSocket();
+const labels = { waiting: 'Waiting for sensor', calibrating: 'Learning the room', quiet: 'Signal is stable',
+  signal_change: 'Signal change detected', motion_candidate: 'Possible motion', disconnected: 'Sensor disconnected',
+  stale: 'Sensor data is stale', offline: 'Server offline' };
+const base = import.meta.env.VITE_API_URL || '';
 
-    return (
-        <div className="app-container">
-            <aside className="sidebar">
-                <header>
-                    <div className="brand">
-                        <Zap className="icon pulse" />
-                        <h1>WIWAVE v4.0</h1>
-                    </div>
-                    <div className={`connection-status ${isConnected ? (systemStatus === 'ok' ? 'online' : 'error') : 'offline'}`}>
-                        {isConnected ? (systemStatus === 'ok' ? 'ACTIVE' : systemStatus.replace('_', ' ').toUpperCase()) : 'OFFLINE'}
-                        <div className="dot"></div>
-                    </div>
-                </header>
-
-                <main className="sidebar-content">
-                    {/* Alerts Section */}
-                    <AnimatePresence>
-                        {alerts?.fall && (
-                            <motion.div className="critical-alert fall" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-                                <AlertTriangle size={24} />
-                                <div>
-                                    <h2>FALL DETECTED</h2>
-                                    <p>Confidence: {(alerts.fall.confidence * 100).toFixed(0)}%</p>
-                                </div>
-                            </motion.div>
-                        )}
-                        {alerts?.gesture && (
-                            <motion.div className="critical-alert gesture" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-                                <Hand size={24} />
-                                <div>
-                                    <h2>GESTURE: {alerts.gesture.gesture.toUpperCase()}</h2>
-                                    <p>Confidence: {(alerts.gesture.confidence * 100).toFixed(0)}%</p>
-                                </div>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
-                    <div className="stats-grid">
-                        <div className="stat-group">
-                            <motion.div className="stat-card" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.1 }}>
-                                <div className="label"><Wifi size={14} /> MACRO (RSSI)</div>
-                                <div className="value">{signal}%</div>
-                                <div className="sub-label">Environment Basis</div>
-                            </motion.div>
-
-                            <motion.div className="stat-card accent" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2 }}>
-                                <div className="label"><Cpu size={14} /> MICRO (RTT)</div>
-                                <div className="value">{rtt} <span className="unit">ms</span></div>
-                                <div className="sub-label">Signal Latency</div>
-                            </motion.div>
-                        </div>
-
-                        <div className="stat-group-mini">
-                            <motion.div className="stat-card mini" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.3 }}>
-                                <div className="label"><Activity size={12} /> JITTER</div>
-                                <div className="value small">{variance.toFixed(2)}</div>
-                            </motion.div>
-
-                            <motion.div className="stat-card mini" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.4 }}>
-                                <div className="label"><Target size={12} /> RANGE</div>
-                                <div className="value small">{distance.toFixed(1)}m</div>
-                            </motion.div>
-
-                            <AnimatePresence>
-                                {bpm && (
-                                    <motion.div 
-                                        className="stat-card mini heart-rate" 
-                                        initial={{ opacity: 0, scale: 0.9 }} 
-                                        animate={{ opacity: 1, scale: 1 }} 
-                                        exit={{ opacity: 0 }}
-                                    >
-                                        <div className="label"><Heart size={12} className="pulse-red" /> HEART</div>
-                                        <div className="value small">{bpm.toFixed(0)} <span className="unit-small">BPM</span></div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
-                        </div>
-                    </div>
-
-                    <div className="system-status-container">
-                        <AnimatePresence mode="wait">
-                            {systemStatus === 'hw_disconnected' ? (
-                                <motion.div key="hw_error" className="status-indicator error" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                                    <AlertTriangle className="icon pulse-red" />
-                                    <div>
-                                        <h3>HARDWARE DISCONNECTED</h3>
-                                        <p>Check Wi-Fi Adapter</p>
-                                    </div>
-                                </motion.div>
-                            ) : isLearning ? (
-                                <motion.div key="learning" className="status-indicator scanning" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                                    <Loader2 className="icon spin" />
-                                    <div style={{ width: '100%' }}>
-                                        <h3>INITIALIZING...</h3>
-                                        <div className="progress-bar-container">
-                                            <div className="progress-bar" style={{ width: `${learningProgress * 100}%` }}></div>
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            ) : (
-                                <motion.div 
-                                    key={status}
-                                    className={`status-indicator ${motionDetected ? 'motion' : status.includes('SCANNING') ? 'scanning' : 'calm'}`}
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    exit={{ opacity: 0 }}
-                                >
-                                    {motionDetected ? <AlertTriangle className="icon pulse-red" /> : 
-                                     status.includes('SCANNING') ? <Activity className="icon pulse-green" /> : 
-                                     <ShieldCheck className="icon" />}
-                                    <div>
-                                        <h3>{motionDetected ? 'MOTION DETECTED' : status.includes('SCANNING') ? 'SCANNING' : 'CALM'}</h3>
-                                        <p>{status}</p>
-                                    </div>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
-                    </div>
-                </main>
-
-                <footer>
-                    <div className="meta">
-                        <div>ENGINE: PRO-V4</div>
-                        <div>MODE: {isLearning ? 'CALIBRATING' : 'FUSION'}</div>
-                    </div>
-                </footer>
-            </aside>
-
-            <section className="radar-view">
-                <RadarScene 
-                    variance={variance} 
-                    motionDetected={motionDetected} 
-                    distance={distance}
-                    multiPersonMode={multiPersonMode}
-                    persons={persons}
-                />
-                
-                <AnimatePresence>
-                    {activeZone && activeZone !== 'Unknown' && !multiPersonMode && (
-                        <motion.div 
-                            className="zone-label-3d"
-                            initial={{ opacity: 0, scale: 0.8 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0 }}
-                        >
-                            <MapPin size={16} /> {activeZone.toUpperCase()}
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-
-                {/* Multi-person panel overlay */}
-                {multiPersonMode && (
-                    <MultiPersonPanel 
-                        personCount={personCount}
-                        persons={persons}
-                        zoneCongestion={zoneCongestion}
-                    />
-                )}
-            </section>
-        </div>
-    );
+function Trace({ history, field, min, max, label, unit }) {
+  const first = history[0]?.at ?? 0;
+  const span = Math.max(10000, (history.at(-1)?.at ?? first) - first);
+  const points = history.map(p => `${((p.at - first) / span) * 800},${110 - Math.max(0, Math.min(1, (p[field] - min) / (max - min))) * 90}`).join(' ');
+  return <div className="trace">
+    <div className="trace-heading"><h3>{label}</h3><span>{min} to {max} {unit}</span></div>
+    <svg viewBox="0 0 800 130" role="img" aria-label={`${label} over the last ${Math.round(span / 1000)} seconds`} preserveAspectRatio="none">
+      {[20, 50, 80, 110].map(y => <line key={y} x1="0" x2="800" y1={y} y2={y} className="chart-grid" />)}
+      {points && <polyline points={points} fill="none" className={`trace-line ${field}`} strokeWidth="2" vectorEffect="non-scaling-stroke" />}
+    </svg>
+    <div className="trace-foot"><span>{history.length ? new Date(first).toLocaleTimeString() : 'Waiting for measurements'}</span><span>NOW</span></div>
+  </div>;
 }
 
-export default App;
+export default function App() {
+  const { data, history, events, connection } = useRadarWebSocket();
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [sessions, setSessions] = useState([]);
+  const available = data.system_status === 'ok';
+  const isCsi = data.source === 'esp32_csi';
+  const sourceName = data.is_simulation ? 'Synthetic demo' : isCsi ? 'ESP32 · CSI' : 'Laptop · RSSI';
+  const title = labels[data.state] || 'Waiting for sensor';
+  const loadSessions = async () => {
+    try {
+      const response = await fetch(`${base}/sessions`);
+      if (response.ok) setSessions(await response.json());
+    } catch { /* Current sensor status carries connection failures. */ }
+  };
+  useEffect(() => {
+    let active = true;
+    fetch(`${base}/sessions`).then(response => response.ok ? response.json() : [])
+      .then(rows => { if (active) setSessions(rows); }).catch(() => {});
+    return () => { active = false; };
+  }, [data.recording]);
+  const action = async path => {
+    setBusy(true);
+    setNotice('');
+    try {
+      const response = await fetch(`${base}${path}`, { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Request failed');
+      setNotice(result.message);
+      await loadSessions();
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+
+  return <div className="workspace">
+    <aside className="sidebar">
+      <a className="brand" href="/" aria-label="Open WiWave Observatory"><Waves size={29} /><span>wiwave<span className="brand-dot">.</span></span></a>
+      <div className="workspace-label">SENSING WORKSPACE <span>05</span></div>
+      <div className="nav-active"><Radio size={18} /> Live monitor <span className="live-dot" /></div>
+      <div className="sidebar-section"><p className="eyebrow">CONNECTED SOURCE</p><div className="source-icon"><Wifi size={22} /></div>
+        <h3>{sourceName}</h3><p className="muted">{data.adapter || 'Connecting to your receiver…'}</p>
+        <dl className="source-details"><div><dt>Network</dt><dd>{data.ssid || (isCsi ? 'CSI receiver' : '—')}</dd></div>
+          <div><dt>Channel</dt><dd>{data.channel ?? '—'}</dd></div><div><dt>Transport</dt><dd>{connection}</dd></div></dl>
+      </div>
+      <div className="sidebar-section capability-list"><p className="eyebrow">MEASUREMENT CAPABILITIES</p>
+        <div><span className="cap-dot enabled" /> Live signal strength</div>
+        <div><span className={`cap-dot ${isCsi ? 'enabled' : ''}`} /> CSI amplitude {isCsi ? 'connected' : 'requires receiver'}</div>
+        <div><span className="cap-dot" /> People & object identification</div>
+        <div><span className="cap-dot" /> Position & distance</div>
+        <p className="muted small">Unmeasured capabilities remain unavailable.</p>
+      </div>
+      <div className="sidebar-bottom"><span className="tiny-square" /> LOCAL-FIRST SENSING<span>v5.0</span></div>
+    </aside>
+
+    <main className="main-content">
+      <header className="topbar"><div><p className="eyebrow">WORKSPACE / LIVE MONITOR</p><h1>Read the room.</h1><p className="subtitle">Live Wi-Fi measurements. A clearer view of signal changes.</p></div>
+        <div className={`source-badge ${data.is_simulation ? 'demo' : available ? 'online' : ''}`}><span className="live-dot" />{data.is_simulation ? 'SIMULATED DATA' : available ? 'LIVE HARDWARE' : 'AWAITING SENSOR'}</div>
+      </header>
+
+      <section className="metric-grid" aria-label="Live measurements">
+        <article className="metric"><div><span>RECEIVED SIGNAL</span><Wifi size={16} /></div><strong>{data.rssi_dbm == null ? '—' : data.rssi_dbm.toFixed(1)}<small>dBm</small></strong><p>Measured at the receiver</p></article>
+        <article className="metric"><div><span>CHANGE SCORE</span><Activity size={16} /></div><strong>{available ? Math.round(data.change_score) : '—'}<small>/ 100</small></strong><p>Baseline deviation · not probability</p></article>
+        <article className="metric"><div><span>READ RATE</span><Cpu size={16} /></div><strong>{available ? data.read_rate_hz.toFixed(1) : '—'}<small>Hz</small></strong><p>{isCsi ? 'Received CSI frames' : 'Driver reads · update rate may vary'}</p></article>
+        <article className="metric"><div><span>DATA AGE</span><Radio size={16} /></div><strong>{data.sample_age_ms == null || connection === 'offline' ? '—' : data.sample_age_ms}<small>ms</small></strong><p>{available ? 'Sensor stream is current' : 'Waiting for fresh measurements'}</p></article>
+      </section>
+
+      <div className="monitor-grid">
+        <section className="panel field-panel"><div className="panel-heading"><div><p className="eyebrow">SIGNAL FIELD</p><h2>Environmental activity</h2></div><span className="tag">{isCsi ? 'CSI AMPLITUDE' : 'RSSI MONITOR'}</span></div>
+          <div className={`field ${available ? 'running' : ''} ${data.motion_detected ? 'changed' : ''}`} aria-label="Signal activity illustration; no measured positions">
+            <div className="field-grid" /><div className="ring ring-one" /><div className="ring ring-two" /><div className="ring ring-three" />
+            <div className="field-cross horizontal" /><div className="field-cross vertical" /><div className="sweep" />
+            <span className="field-label top">SIGNAL ENVIRONMENT</span><span className="field-label bottom">ACTIVITY VIEW · NO POSITION DATA</span>
+            <div className="receiver"><Waves size={35} /><span>RECEIVER</span></div>
+          </div>
+          <div className="field-caption"><span className={`live-dot ${available ? '' : 'inactive'}`} />{data.is_simulation ? 'Demo visualization using synthetic measurements' : 'Activity illustration driven by live measurements'}<span>NO TARGETS INFERRED</span></div>
+        </section>
+
+        <section className="panel detection-panel"><p className="eyebrow">DETECTION STATE</p><div className={`state-symbol ${data.motion_detected ? 'changed' : ''}`}><Activity size={27} /></div>
+          <h2 aria-live="polite">{title}</h2><p className="state-description">{data.error || (data.state === 'calibrating' ? 'Keep the room quiet and your laptop and router stationary while the baseline is learned.' : data.motion_detected ? (isCsi ? 'Channel changes may indicate movement. Human presence has not been verified.' : 'The Wi-Fi link changed. Movement, interference, or receiver changes can cause this.') : available ? 'Monitoring changes relative to your quiet-room baseline. A stable signal does not prove the room is empty.' : 'Connect your Wi-Fi adapter or configured CSI receiver to resume live monitoring.')}</p>
+          <div className="meter-label"><span>{data.state === 'calibrating' ? 'Calibration' : 'Signal change score'}</span><strong>{data.state === 'calibrating' ? `${Math.round(data.learning_progress * 100)}%` : `${Math.round(data.change_score)} / 100`}</strong></div>
+          <div className="meter"><div style={{ width: `${data.state === 'calibrating' ? data.learning_progress * 100 : data.change_score}%` }} /></div>
+          <button className="button calibrate" disabled={busy || !available} onClick={() => action('/api/calibrate')}><RotateCcw size={15} /> Calibrate quiet room</button>
+          <div className="unavailable-metrics"><div><span>PEOPLE</span><strong>—</strong></div><div><span>RANGE</span><strong>—</strong></div><div><span>EVENTS</span><strong>{data.event_count}</strong></div></div>
+          <p className="small muted">{isCsi ? 'CSI motion detection is experimental and needs testing in this room.' : 'Add an ESP32 CSI receiver for richer motion measurements.'}</p>
+        </section>
+      </div>
+
+      <section className="panel telemetry-panel"><div className="panel-heading"><div><p className="eyebrow">LIVE TELEMETRY</p><h2>The signal, over time</h2></div><span className="legend"><span className="live-dot" /> RSSI <i /> Change score</span></div>
+        <div className="charts"><Trace history={history} field="rssi" min={-100} max={-20} label="Signal strength" unit="dBm" /><Trace history={history} field="score" min={0} max={100} label="Baseline deviation" unit="" /></div>
+      </section>
+
+      <div className="bottom-grid"><section className="panel events-panel"><div className="panel-heading"><h2>Activity log</h2><span className="tag">THIS CONNECTION</span></div>
+        {events.length ? <ul className="event-list">{events.map((event, i) => <li key={`${event.at}-${i}`}><span className="event-marker" /><span>{labels[event.state] || event.state}</span><time>{event.at}</time></li>)}</ul> : <p className="muted">Sensor transitions will appear here.</p>}
+      </section><section className="panel sessions-panel"><div className="panel-heading"><h2>Recorded sessions</h2><button className={`button ${data.recording ? 'recording' : ''}`} disabled={busy || (!data.recording && !available)} onClick={() => action(data.recording ? '/session/stop' : '/session/start')}><Circle size={12} fill={data.recording ? 'currentColor' : 'none'} />{data.recording ? 'Stop recording' : 'Record session'}</button></div>
+        {sessions.length ? <ul className="session-list">{sessions.slice(0, 4).map(session => <li key={session.id}><div><strong>{session.name}</strong><span>{new Date(session.start_time).toLocaleString()}{data.session_id === session.id ? ' · Recording' : ''}</span></div><a href={`${base}/session/${session.id}/export`} aria-label={`Export ${session.name}`} title="Export CSV"><ArrowDownToLine size={17} /></a></li>)}</ul> : <p className="muted">Record live measurements to compare a quiet room with a walk-through. Export sessions as CSV.</p>}
+        {data.recording_error && <p className="error-text">Recording failed: {data.recording_error}</p>}
+      </section></div>
+      {notice && <div className="notice" role="status">{notice}<button aria-label="Dismiss message" onClick={() => setNotice('')}>×</button></div>}
+      <footer className="page-footer">WiWave / Experimental environmental sensing<span>RSSI and untrained CSI do not identify humans or objects.</span></footer>
+    </main>
+  </div>;
+}

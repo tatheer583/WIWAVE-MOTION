@@ -1,5 +1,10 @@
 # Multi-Person Detection Implementation Status
 
+> Historical prototype status, retained for reference. The claims below concern
+> software modules and synthetic tests, not verified real-world human detection.
+> These modules do not drive the current live backend. See
+> [current status and remaining work](docs/PROJECT_STATUS.md).
+
 ## ✅ IMPLEMENTATION COMPLETE
 
 All multi-person detection features have been successfully implemented and tested.
