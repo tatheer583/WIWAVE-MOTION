@@ -20,6 +20,7 @@ The reference is [RuView](https://github.com/ruvnet/RuView), pinned at
 | Session recording and export | Included for local backend | HTTP / WebSocket / SQLite integration tests |
 | Session replay, seek, pause, speed | Added | Preserves timestamps and source labels; first 10,000 snapshots; CSV exports full recording |
 | ESP32 CSI serial capture | Implemented, hardware validation pending | Header-aware Espressif CSV parser; not RuView binary firmware UDP |
+| Labelled CSI data collection | Added | Opt-in amplitude-only capture; up to 10 Hz, 512 bins/frame, 180 seconds/trial, 15,000 frames total |
 | RuView sensing-server connection | Included | Protocol adapter tested; an external compatible server is required |
 | Human presence and count estimates | Can display upstream CSI output | No local human model; cannot certify upstream accuracy |
 | 17-keypoint model poses | Can display upstream CSI output | COCO order; each joint confidence >= 0.25; placeholder/zero-confidence poses hidden |

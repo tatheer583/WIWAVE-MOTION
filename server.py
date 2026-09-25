@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import time
+from typing import Literal
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Request, WebSocket, Query
@@ -47,6 +48,9 @@ class Runtime:
         self.recording_error = None
         self.db_lock = asyncio.Lock()
         self.started = utc_now()
+        self.csi_queue = asyncio.Queue(maxsize=100)
+        self.csi_trial = None
+        self.csi_trial_error = None
 
     def snapshot(self):
         age = time.monotonic() - self.last_received if self.last_received is not None else None
@@ -70,6 +74,10 @@ class Runtime:
                              'object_classification': False, 'vital_signs': False},
             'recording': self.session_id is not None, 'session_id': self.session_id,
             'recording_error': self.recording_error,
+            'csi_trial': ({'id': self.csi_trial['id'], 'active': self.csi_trial['active'],
+                           'label': self.csi_trial['label'], 'samples': self.csi_trial['samples'],
+                           'dropped': self.csi_trial['dropped']}
+                          if self.csi_trial else None),
         })
         if not fresh:
             result.update(motion_detected=False, change_score=0, read_rate_hz=0, signal=None, rssi_dbm=None)
@@ -85,9 +93,32 @@ class Runtime:
                     detection = self.detector.update(sample, now)
                     self.sequence += 1
                     self.latest = {k: v for k, v in sample.items() if k != 'amplitudes'}
-                    self.latest.update(detection, sequence=self.sequence, timestamp=utc_now())
+                    self.latest.update(detection, sequence=self.sequence, timestamp=utc_now(),
+                                       amplitudes_ready=sample.get('amplitudes') is not None,
+                                       subcarrier_count=len(sample['amplitudes']) if sample.get('amplitudes') is not None else None)
                     self.last_received = now
                     self.error = None
+                    trial = self.csi_trial
+                    if trial and trial['active'] and sample.get('amplitudes') is not None:
+                        if now >= trial['deadline']:
+                            trial['active'] = False
+                            trial['stop_reason'] = 'time_limit'
+                        elif trial['accepted'] >= trial['limit']:
+                            trial['active'] = False
+                            trial['stop_reason'] = 'storage_limit'
+                        elif now >= trial['next_capture']:
+                            trial['next_capture'] = now + 0.1
+                            frame = {'timestamp': self.latest['timestamp'], 'sequence': self.sequence,
+                                     'label': trial['label'], 'rssi_dbm': sample.get('rssi_dbm'),
+                                     'channel': sample.get('channel'),
+                                     'subcarrier_count': len(sample['amplitudes']),
+                                     'amplitudes': sample['amplitudes'][:512],
+                                     'truncated': len(sample['amplitudes']) > 512}
+                            try:
+                                self.csi_queue.put_nowait((trial['id'], frame))
+                                trial['accepted'] += 1
+                            except asyncio.QueueFull:
+                                trial['dropped'] += 1
             except ValueError as exc:
                 self.invalid_frames += 1
                 self.error = str(exc)
@@ -127,12 +158,72 @@ class Runtime:
                 except Exception as exc:
                     self.recording_error = str(exc)
 
+    async def record_csi_trials(self):
+        while True:
+            trial = self.csi_trial
+            if trial and trial['active']:
+                if time.monotonic() >= trial['deadline']:
+                    trial['active'] = False
+                    trial['stop_reason'] = 'time_limit'
+                elif self.last_received is None or time.monotonic() - self.last_received > 3:
+                    trial['active'] = False
+                    trial['stop_reason'] = 'sensor_disconnected'
+
+            batch = []
+            try:
+                batch.append(await asyncio.wait_for(self.csi_queue.get(), timeout=0.25))
+            except asyncio.TimeoutError:
+                pass
+            while len(batch) < 25:
+                try:
+                    batch.append(self.csi_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if batch:
+                by_trial = {}
+                for trial_id, _ in batch:
+                    by_trial[trial_id] = by_trial.get(trial_id, 0) + 1
+                try:
+                    async with self.db_lock:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.executemany(
+                                'INSERT INTO csi_trial_samples (trial_id,timestamp,sequence,label,rssi_dbm,channel,subcarrier_count,amplitudes,truncated) VALUES (?,?,?,?,?,?,?,?,?)',
+                                [(trial_id, frame['timestamp'], frame['sequence'], frame['label'], frame['rssi_dbm'],
+                                  frame['channel'], frame['subcarrier_count'], json.dumps(frame['amplitudes']), frame['truncated'])
+                                 for trial_id, frame in batch])
+                            for trial_id, count in by_trial.items():
+                                await db.execute('UPDATE csi_trials SET sample_count=sample_count+? WHERE id=?', (count, trial_id))
+                            await db.commit()
+                    if self.csi_trial and self.csi_trial['id'] in by_trial:
+                        self.csi_trial['samples'] += by_trial[self.csi_trial['id']]
+                except Exception as exc:
+                    self.csi_trial_error = str(exc)
+                    trial = self.csi_trial
+                    if trial and trial['id'] in by_trial:
+                        trial['dropped'] += by_trial[trial['id']]
+
+            trial = self.csi_trial
+            if trial and not trial['active'] and self.csi_queue.empty():
+                try:
+                    async with self.db_lock:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute('UPDATE csi_trials SET end_time=?,stop_reason=?,dropped_samples=? WHERE id=?',
+                                             (utc_now(), trial.get('stop_reason', 'stopped'), trial['dropped'], trial['id']))
+                            await db.commit()
+                    self.csi_trial = None
+                except Exception as exc:
+                    self.csi_trial_error = str(exc)
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, start_time TEXT, end_time TEXT, name TEXT)')
         await db.execute('CREATE TABLE IF NOT EXISTS sensing_telemetry (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, timestamp TEXT, payload TEXT, FOREIGN KEY(session_id) REFERENCES sessions(id))')
         await db.execute('CREATE INDEX IF NOT EXISTS sensing_session_idx ON sensing_telemetry(session_id)')
+        await db.execute('CREATE TABLE IF NOT EXISTS csi_trials (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, initial_label TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT, stop_reason TEXT, sample_count INTEGER NOT NULL DEFAULT 0, dropped_samples INTEGER NOT NULL DEFAULT 0)')
+        await db.execute('CREATE TABLE IF NOT EXISTS csi_trial_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, trial_id INTEGER NOT NULL, timestamp TEXT NOT NULL, sequence INTEGER NOT NULL, label TEXT NOT NULL, rssi_dbm REAL, channel INTEGER, subcarrier_count INTEGER NOT NULL, amplitudes TEXT NOT NULL, truncated INTEGER NOT NULL, FOREIGN KEY(trial_id) REFERENCES csi_trials(id))')
+        await db.execute('CREATE INDEX IF NOT EXISTS csi_trial_sample_idx ON csi_trial_samples(trial_id,id)')
+        await db.execute("UPDATE csi_trials SET end_time=?,stop_reason='server_restarted' WHERE end_time IS NULL", (utc_now(),))
         await db.commit()
 
 
@@ -141,10 +232,16 @@ async def lifespan(app):
     await init_db()
     runtime = Runtime(create_source())
     app.state.runtime = runtime
-    tasks = [asyncio.create_task(runtime.acquire()), asyncio.create_task(runtime.publish()), asyncio.create_task(runtime.record())]
+    tasks = [asyncio.create_task(runtime.acquire()), asyncio.create_task(runtime.publish()), asyncio.create_task(runtime.record()), asyncio.create_task(runtime.record_csi_trials())]
     try:
         yield
     finally:
+        if runtime.csi_trial:
+            runtime.csi_trial['active'] = False
+            runtime.csi_trial['stop_reason'] = 'server_shutdown'
+            deadline = time.monotonic() + 3
+            while runtime.csi_trial and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -188,6 +285,127 @@ async def poll_data():
 @app.get('/api/capabilities')
 async def capabilities():
     return app.state.runtime.snapshot()['capabilities']
+
+
+class CsiTrialStart(BaseModel):
+    name: str = Field(default='Room trial', min_length=1, max_length=80)
+    label: Literal['empty_room', 'person_still', 'person_moving', 'fan_interference', 'door_change', 'pet_or_other_motion']
+    seconds: int = Field(default=120, ge=10, le=180)
+
+
+class CsiTrialLabel(BaseModel):
+    label: Literal['empty_room', 'person_still', 'person_moving', 'fan_interference', 'door_change', 'pet_or_other_motion']
+
+
+@app.get('/api/csi/trials')
+async def csi_trials():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM csi_trials ORDER BY id DESC LIMIT 50') as cursor:
+            trials = [dict(row) for row in await cursor.fetchall()]
+        async with db.execute('SELECT COALESCE(SUM(sample_count),0) FROM csi_trials') as cursor:
+            total_samples = (await cursor.fetchone())[0]
+    return {'active': app.state.runtime.snapshot()['csi_trial'], 'trials': trials,
+            'total_samples': total_samples, 'error': app.state.runtime.csi_trial_error}
+
+
+@app.post('/api/csi/trials/start')
+async def start_csi_trial(request: CsiTrialStart):
+    runtime = app.state.runtime
+    if runtime.source.source != 'esp32_csi':
+        raise HTTPException(409, 'Select and connect an ESP32 CSI serial source before collecting CSI trials.')
+    if runtime.snapshot()['system_status'] != 'ok' or not runtime.latest.get('amplitudes_ready', False):
+        raise HTTPException(409, 'Waiting for fresh CSI frames. Check the serial port and firmware CSV stream.')
+    if not request.name.strip():
+        raise HTTPException(422, 'Give this trial a short non-identifying name.')
+    async with runtime.db_lock:
+        if runtime.csi_trial:
+            raise HTTPException(409, 'Stop or wait for the current CSI trial before starting another.')
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT COALESCE(SUM(sample_count),0) FROM csi_trials') as cursor:
+                total = (await cursor.fetchone())[0]
+            if total >= 15000:
+                raise HTTPException(409, 'Local CSI trial capacity reached. Export and remove old trials before collecting more data.')
+            limit = min(request.seconds * 10, 15000 - total)
+            cursor = await db.execute('INSERT INTO csi_trials (name,initial_label,start_time) VALUES (?,?,?)',
+                                      (request.name.strip(), request.label, utc_now()))
+            await db.commit()
+        now = time.monotonic()
+        runtime.csi_trial_error = None
+        trial_id = cursor.lastrowid
+        runtime.csi_trial = {'id': trial_id, 'label': request.label, 'active': True,
+                             'deadline': now + request.seconds, 'next_capture': 0.0,
+                             'samples': 0, 'accepted': 0, 'limit': limit,
+                             'dropped': 0, 'stop_reason': 'stopped'}
+    return {'message': 'CSI amplitude trial started. Samples are stored only in the local database.',
+            'trial_id': trial_id, 'seconds': request.seconds, 'sample_rate_limit_hz': 10,
+            'amplitude_bins_limit': 512, 'sample_limit': limit, 'schema': 'wiwave-csi-amplitude-v1'}
+
+
+@app.post('/api/csi/trials/label')
+async def label_csi_trial(request: CsiTrialLabel):
+    runtime = app.state.runtime
+    trial = runtime.csi_trial
+    if not trial or not trial['active']:
+        raise HTTPException(409, 'No CSI trial is currently collecting samples.')
+    trial['label'] = request.label
+    return {'message': 'Label changed. New frames will use this label.', 'label': request.label}
+
+
+@app.post('/api/csi/trials/stop')
+async def stop_csi_trial():
+    trial = app.state.runtime.csi_trial
+    if not trial:
+        return {'message': 'No CSI trial is active.'}
+    trial['active'] = False
+    trial['stop_reason'] = 'stopped_by_operator'
+    return {'message': 'CSI trial is stopping after buffered samples are saved.', 'trial_id': trial['id']}
+
+
+@app.get('/api/csi/trials/{trial_id}/export')
+async def export_csi_trial(trial_id: int):
+    active = app.state.runtime.csi_trial
+    if active and active['id'] == trial_id:
+        raise HTTPException(409, 'Stop the active trial and wait for it to finish before downloading.')
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM csi_trials WHERE id=?', (trial_id,)) as cursor:
+            trial = await cursor.fetchone()
+        if trial is None:
+            raise HTTPException(404, 'CSI trial not found')
+        async with db.execute('SELECT COUNT(*) FROM csi_trial_samples WHERE trial_id=?', (trial_id,)) as cursor:
+            count = (await cursor.fetchone())[0]
+    if count == 0:
+        raise HTTPException(409, 'This trial has no CSI frames to export.')
+
+    async def lines():
+        yield json.dumps({'record_type': 'metadata', 'schema': 'wiwave-csi-amplitude-v1',
+                          **dict(trial), 'source': 'esp32_csi', 'amplitude_units': 'hypot(I,Q), device-dependent',
+                          'note': 'CSI magnitude vectors only; phase and raw signed I/Q were not captured.'}, allow_nan=False) + '\n'
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT timestamp,sequence,label,rssi_dbm,channel,subcarrier_count,amplitudes,truncated FROM csi_trial_samples WHERE trial_id=? ORDER BY id', (trial_id,)) as cursor:
+                async for row in cursor:
+                    yield json.dumps({'record_type': 'sample', 'timestamp': row[0], 'sequence': row[1],
+                                      'label': row[2], 'rssi_dbm': row[3], 'channel': row[4],
+                                      'subcarrier_count': row[5], 'amplitudes': json.loads(row[6]),
+                                      'truncated': bool(row[7])}, allow_nan=False) + '\n'
+    return StreamingResponse(lines(), media_type='application/x-ndjson',
+                             headers={'Content-Disposition': f'attachment; filename=wiwave_csi_trial_{trial_id}.jsonl'})
+
+
+@app.delete('/api/csi/trials/{trial_id}')
+async def delete_csi_trial(trial_id: int):
+    runtime = app.state.runtime
+    if runtime.csi_trial and runtime.csi_trial['id'] == trial_id:
+        raise HTTPException(409, 'Stop the active CSI trial before removing it.')
+    async with runtime.db_lock:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute('DELETE FROM csi_trial_samples WHERE trial_id=?', (trial_id,))
+            result = await db.execute('DELETE FROM csi_trials WHERE id=?', (trial_id,))
+            await db.commit()
+            if result.rowcount == 0:
+                raise HTTPException(404, 'CSI trial not found')
+    return {'message': 'CSI trial and its local sample data were removed.'}
 
 
 @app.post('/api/calibrate')

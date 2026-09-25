@@ -3,8 +3,9 @@ import { emptyFrame, normalizeFrame } from './wiwave-data.js';
 const el = id => document.getElementById(id);
 const show = (id, value) => { const node = el(id); if (node) node.textContent = value ?? '—'; };
 const format = (value, suffix = '') => Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : '—';
-async function api(path, method = 'GET') {
-  const response = await fetch(path, { method, signal: AbortSignal.timeout(8000) });
+async function api(path, method = 'GET', body = null) {
+  const response = await fetch(path, { method, signal: AbortSignal.timeout(8000),
+    ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   if (!response.ok) throw new Error(`Request failed (${response.status})`);
   return response.json();
 }
@@ -74,6 +75,20 @@ export class WorkspaceControls {
       content.innerHTML = '<p class="workspace-intro">Local recordings · original timestamps and source labels are preserved.</p><button id="sessions-refresh">Refresh recordings</button><div id="session-list">Loading…</div>';
       el('sessions-refresh').onclick = () => this.loadSessions();
       this.loadSessions();
+    } else if (this.page === 'dataset') {
+      content.innerHTML = `<p class="workspace-intro">Collect short, manually labelled CSI amplitude trials</p><p id="trial-live-device"></p>
+        <p>First flash Espressif's <a href="https://github.com/espressif/esp-csi/tree/master/examples/get-started/csi_recv_router" target="_blank" rel="noreferrer">csi_recv_router</a>, install the optional serial requirements, set WIWAVE_SOURCE=esp32_csi and WIWAVE_CSI_PORT, then restart WiWave.</p>
+        <label class="trial-input">Trial name <input id="trial-name" maxlength="80" value="Room trial"></label>
+        <label class="trial-input">Current room label <select id="trial-label"><option value="empty_room">Empty room</option><option value="person_still">Person present, still</option><option value="person_moving">Person moving</option><option value="fan_interference">Fan / airflow interference</option><option value="door_change">Door / furniture change</option><option value="pet_or_other_motion">Pet / other motion</option></select></label>
+        <label class="trial-input">Maximum time <select id="trial-seconds"><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120" selected>2 minutes</option><option value="180">3 minutes</option></select></label>
+        <div class="workspace-actions"><button id="trial-start">Start CSI trial</button><button id="trial-label-mark">Apply label to new frames</button><button id="trial-stop">Stop trial</button></div>
+        <p id="trial-status" role="status">CSI trials are opt-in and require a connected CSI stream.</p>
+        <p class="workspace-muted">Starts storing up to 10 CSI amplitude frames/s in the local SQLite database (maximum 180 seconds, 512 amplitudes/frame and 15,000 total samples). Labels describe the room condition you observe; they do not create model predictions. Signed I/Q phase, BSSID, and person identity are not stored. Shared participant data should be collected only with consent. Download or remove trials below.</p>
+        <div id="csi-trial-list"></div>`;
+      el('trial-start').onclick = () => this.startCsiTrial();
+      el('trial-label-mark').onclick = () => this.labelCsiTrial();
+      el('trial-stop').onclick = () => this.stopCsiTrial();
+      this.loadCsiTrials();
     } else if (this.page === 'models') {
       content.innerHTML = `<p class="workspace-intro">Research sources and model connection</p><p>The local backend has a signal-change detector. Human count, pose, falls, and vital signs require a separate compatible CSI sensing engine and validation in your room.</p>
         <p>Connect a RuView server using its WebSocket endpoint in Settings → Data. Valid 17-keypoint model outputs can be displayed; confidence-zero or heuristic person locations do not create skeletons.</p>
@@ -100,6 +115,71 @@ export class WorkspaceControls {
         row.append(title, csv, play); list.append(row);
       }
     } catch (error) { if (token === this.requestId) this.notice(error.message); }
+  }
+  async startCsiTrial() {
+    el('trial-start').disabled = true;
+    try {
+      const result = await api('/api/csi/trials/start', 'POST', {
+        name: el('trial-name').value, label: el('trial-label').value, seconds: Number(el('trial-seconds').value),
+      });
+      show('trial-status', `${result.message} Trial #${result.trial_id}. Max 10 frames/s; up to 512 amplitude bins per frame.`);
+      await this.loadCsiTrials();
+    } catch (error) { show('trial-status', error.message); }
+    finally { el('trial-start').disabled = false; }
+  }
+  async labelCsiTrial() {
+    try {
+      const result = await api('/api/csi/trials/label', 'POST', { label: el('trial-label').value });
+      show('trial-status', `${result.message} New samples: ${result.label}.`);
+    } catch (error) { show('trial-status', error.message); }
+  }
+  async stopCsiTrial() {
+    el('trial-stop').disabled = true;
+    try {
+      const result = await api('/api/csi/trials/stop', 'POST'); show('trial-status', result.message);
+      await this.loadCsiTrials();
+    } catch (error) { show('trial-status', error.message); }
+    finally { el('trial-stop').disabled = false; }
+  }
+  async loadCsiTrials() {
+    const token = ++this.requestId;
+    try {
+      const result = await api('/api/csi/trials');
+      if (token !== this.requestId || this.page !== 'dataset') return;
+      const local = this.obs._currentData?.meta?.local;
+      const connected = this.obs.settings.dataSource === 'native' && local?.source === 'esp32_csi' && local.system_status === 'ok';
+      const active = result.active?.active;
+      el('trial-start').disabled = !connected || Boolean(result.active);
+      el('trial-label-mark').disabled = !active;
+      el('trial-stop').disabled = !active;
+      if (!active && !connected) show('trial-status', 'CSI collection is unavailable. Start a CSI serial source and wait for live frames before collecting.');
+      else if (active) show('trial-status', `Trial #${result.active.id} · ${result.active.label} · ${result.active.samples} saved frames · ${result.active.dropped} dropped. Select a room label and apply it before the next condition.`);
+      else show('trial-status', result.error || 'CSI is connected. Starting a trial will store labeled amplitude data locally.');
+      const list = el('csi-trial-list'); list.replaceChildren();
+      for (const trial of result.trials) {
+        const row = document.createElement('div'); row.className = 'session-row';
+        const summary = document.createElement('span'); summary.textContent = `#${trial.id} · ${trial.name} · ${trial.initial_label} · ${trial.sample_count} frames · ${trial.start_time}${trial.end_time ? ` · ${trial.stop_reason || 'stopped'}` : ' · finalizing'}`;
+        row.append(summary);
+        if (trial.end_time && trial.sample_count > 0) {
+          const download = document.createElement('a'); download.href = `/api/csi/trials/${Number(trial.id)}/export`; download.textContent = 'Download JSONL'; download.download = '';
+          row.append(download);
+        }
+        if (trial.end_time) {
+          const remove = document.createElement('button'); remove.textContent = 'Delete';
+          remove.onclick = async () => {
+            if (!window.confirm(`Delete trial #${trial.id} and its local CSI data?`)) return;
+            try { const response = await api(`/api/csi/trials/${Number(trial.id)}`, 'DELETE'); show('trial-status', response.message); await this.loadCsiTrials(); }
+            catch (error) { show('trial-status', error.message); }
+          };
+          row.append(remove);
+        }
+        list.append(row);
+      }
+      const capacity = document.createElement('p'); capacity.className = 'workspace-muted';
+      capacity.textContent = `${result.total_samples} / 15,000 CSI frames stored locally.`;
+      list.prepend(capacity);
+      if (!result.trials.length) list.textContent = 'No CSI trials saved. Connect a CSI device to enable collection.';
+    } catch (error) { if (token === this.requestId) show('trial-status', error.message); }
   }
   async loadReplay(id, button) {
     const token = ++this.requestId; button.disabled = true;
@@ -168,6 +248,26 @@ export class WorkspaceControls {
         list.append(row);
       }
       if (!list.childElementCount) list.textContent = 'No sensor nodes reported by this stream.';
+    }
+    if (this.page === 'dataset' && mode === 'native') {
+      const trial = meta.local?.csi_trial;
+      if (trial?.active) {
+        this.lastObservedTrial = trial.id;
+        el('trial-label').value = trial.label;
+        show('trial-status', `Trial #${trial.id} · ${trial.label} · ${trial.samples} saved frames · ${trial.dropped} dropped.`);
+        el('trial-stop').disabled = false;
+        el('trial-label-mark').disabled = false;
+      } else if (trial) {
+        el('trial-stop').disabled = true; el('trial-label-mark').disabled = true;
+      }
+      if (!trial && this.lastObservedTrial && !this.refreshingCsiTrials) {
+        this.lastObservedTrial = null; this.refreshingCsiTrials = true;
+        this.loadCsiTrials().finally(() => { this.refreshingCsiTrials = false; });
+      }
+      show('trial-live-device', meta.local?.source === 'esp32_csi'
+        ? `${meta.fresh ? 'CSI stream connected' : 'CSI stream waiting'} · ${meta.local.subcarrier_count || '—'} input subcarriers`
+        : 'No live CSI frames. Windows Wi-Fi RSSI does not include subcarrier data.');
+      if (!trial?.active) el('trial-start').disabled = !(meta.local?.source === 'esp32_csi' && meta.fresh);
     }
   }
 }
