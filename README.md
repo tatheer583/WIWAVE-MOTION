@@ -40,6 +40,7 @@ running and run `npm run dev` in `frontend`.
 - All twelve reference scenarios, explicitly labelled synthetic demonstrations.
 - Operations, devices, recordings, research links and feature-status workspace.
 - Replay with pause, seek and speed controls, preserving original data provenance.
+- Opt-in, time-bounded CSI amplitude trials with manual labels and JSONL export.
 - Optional connection to a separate RuView sensing server for compatible estimates.
 - Direct Windows Native Wi-Fi RSSI queries, outside the async request loop.
 - Robust baseline calibration, sustained-change detection, and reconnection.
@@ -66,6 +67,10 @@ serial baud rate, and `WIWAVE_CSI_PORT`. No CSI hardware was attached during thi
 implementation. Native laptop RSSI is currently supported on Windows; ESP32 serial
 input can be used on Windows, Linux, or macOS.
 
+On Windows, after flashing `csi_recv_router` and installing the optional reader,
+run `scripts/start-csi.ps1`. It detects connected serial ports and starts a CSI-only
+server. It does not fall back to simulated readings if the board disconnects.
+
 ## API
 
 | Route | Purpose |
@@ -80,6 +85,15 @@ input can be used on Windows, Linux, or macOS.
 | `GET /sessions` | Most recent recording sessions |
 | `GET /session/{id}/export` | CSV export, including existing legacy sessions |
 | `GET /session/{id}/frames?limit=10000` | Bounded recorded snapshots for replay |
+| `GET /api/csi/trials` | List recent labelled CSI amplitude trials |
+| `POST /api/csi/trials/start` | Opt in to local CSI capture (10–180 seconds) |
+| `POST /api/csi/trials/label` | Label subsequent samples in an active trial |
+| `POST /api/csi/trials/stop` | Stop and flush the current CSI trial |
+| `GET /api/csi/trials/{id}/export` | Download labelled amplitude frames as JSON Lines |
+| `DELETE /api/csi/trials/{id}` | Remove a CSI trial and its local data |
+
+Open **Workspace → CSI data** to start a short labelled capture and download JSONL.
+Trials stay in the local database unless you explicitly download a data file.
 
 ## Verification
 
@@ -103,6 +117,10 @@ records are retained; new measurements use an additional `sensing_telemetry` tab
 
 Cloud hosts cannot measure your laptop's Wi-Fi. `render.yaml` runs a labelled demo.
 See the live guide for deployment and persistence constraints.
+
+Local CSI recordings stay inside the ignored SQLite database until you explicitly
+download a JSONL export. CSI collection requires a supported serial receiver and
+starting a labelled trial under **Workspace → CSI data**.
 
 The Observatory includes MIT-licensed RuView code with its
 [license and provenance](frontend/observatory/PROVENANCE.md). This release does

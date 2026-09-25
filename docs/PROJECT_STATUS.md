@@ -11,6 +11,7 @@ Updated 2026-09-25.
 - Operations workspace, device view, recording, CSV export and timed replay.
 - Compatible RuView sensing-output adapter; unknown outputs remain unavailable.
 - ESP32 CSV source, parsers, API tests, UI logic tests and research documentation.
+- Opt-in labelled CSI pilot collection, with bounded local retention, JSONL export and deletion.
 
 The Windows Intel Wireless-AC 8265 hardware stream was verified after deployment.
 A 30-second capture produced 279 distinct driver reads, approximately
@@ -22,7 +23,8 @@ it does not establish human-detection accuracy or independent radio frame rate.
 ## Remaining work
 
 1. **Physical CSI capture:** connect and flash compatible ESP32 hardware or another
-   CSI-capable platform; validate the input pipeline against real packets.
+   CSI-capable platform; use **Workspace → CSI data** to collect pilots and validate
+   the capture pipeline against real packets.
 2. **Room trials:** collect labelled quiet/motion/interference cases and measure
    false alarms and missed events. No person was observed or inferred during the
    unattended RSSI verification.
@@ -40,8 +42,10 @@ it does not establish human-detection accuracy or independent radio frame rate.
 
 ## Validation commands
 
-Release checks: 30 backend tests and 7 frontend tests passed; lint and production
-build passed. The installed frontend dependency audit reported zero vulnerabilities.
+The previous published baseline passed 30 backend tests and 7 frontend tests,
+lint, and a production build. This CSI capture update imports as a server module
+and the Observatory production build succeeds. Real collection still needs CSI
+hardware. The installed frontend dependency audit reported zero vulnerabilities.
 
 ```powershell
 .\.venv\Scripts\python.exe -B -m pytest tests -q

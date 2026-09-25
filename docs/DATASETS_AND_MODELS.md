@@ -37,8 +37,11 @@ connection without claiming that a model is installed, trained or validated.
 
 1. Capture CSI with known firmware, receiver identity, packet timestamps, channel,
    antenna/subcarrier ordering and packet sequence. Verify packet loss and sample
-   rate on the hardware. The current serial source supports Espressif CSV; RuView
-   firmware's binary UDP needs its matching upstream runtime or a new adapter.
+   rate on the hardware. **Workspace → CSI data** captures labelled pilot frames
+   at up to 10 Hz (the first 512 amplitude bins). The current serial source supports
+   Espressif CSV; RuView firmware's binary UDP needs its matching upstream runtime
+   or a new adapter. WiWave's capture omits signed I/Q and phase: confirm that the
+   model can use magnitude vectors before training.
 2. Collect an empty-room baseline and labelled room trials: empty, one stationary
    person, walking, fan motion, door changes and ordinary network traffic. Record
    failures as well as successes, with consent from participants.

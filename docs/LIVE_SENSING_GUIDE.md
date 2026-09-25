@@ -50,6 +50,10 @@ $env:SIMULATION_MODE = 'false'
 .\.venv\Scripts\python.exe server.py
 ```
 
+On Windows, use `scripts/start-csi.ps1` after installing the optional reader and
+flashing compatible firmware. The script detects COM ports, sets CSI mode explicitly
+and stops with a clear error if the requested port is missing.
+
 Close any other serial monitor before connecting. If the header was printed
 before WiWave opened the port, reset the board so it emits the header again.
 Both board and host must use the same baud rate. Large CSI frames at high packet
@@ -57,10 +61,33 @@ rates require a higher firmware UART baud rate; increasing only the host rate
 does not solve that problem. Observe the reported frame rate and invalid-frame
 counter instead of assuming a requested rate was achieved.
 
-The first implementation uses normalized amplitudes, not a trained presence
+The motion score uses normalized subcarrier amplitudes, not a trained presence
 classifier. Its state is **Possible motion**, and human identification remains
 unavailable. Phase processing, antenna calibration, validated classification,
 and spatial localization are future work.
+
+### Collect a labelled CSI pilot trial
+
+After CSI hardware is connected and the CSI stream reports fresh frames, open
+**Workspace → CSI data**. Choose a non-identifying trial name, select the room
+condition you are observing and a 30–180 second limit, then start capture. Change
+the label and select **Apply label to new frames** before each room condition
+change. Stop between conditions if you are unsure about the exact transition time.
+Record one condition at a time where possible.
+
+Collection is opt-in. The local database stores at most 10 amplitude vectors per
+second, 512 amplitude bins per vector, 180 seconds per trial and 15,000 samples
+across all retained trials. Captures preserve the first 512 subcarriers in their
+original order and mark truncated frames. RSSI, channel, timestamps, sample
+sequence and manual room labels accompany the vectors. The trial does not store
+BSSID, Wi-Fi network name or participant identity. It stores magnitude `hypot(I,Q)`,
+not signed I/Q samples or phase. A trusted RuView runtime or trained CSI model is
+not part of this release.
+
+Download trials as JSON Lines. Each file begins with trial metadata, followed by
+one labelled CSI frame per line. Download and move a copy to your research data
+folder before deleting a trial; deletion permanently removes local sample frames.
+Include empty-room baselines and repeat conditions across sessions before training.
 
 ## A useful first experiment
 
