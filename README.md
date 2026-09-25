@@ -1,22 +1,24 @@
-# WiWave · Live Wi-Fi Sensing Observatory
+# WiWave Motion
 
-A local sensing workspace with a [RuView](https://github.com/ruvnet/RuView)-derived
-3D Observatory, real Wi-Fi measurements, calibrated signal changes, recordings,
-replay and optional ESP32 channel-state-information (CSI) experiments.
+**A local Wi-Fi signal monitoring workspace with an interactive 3D Observatory and an optional CSI research workflow.**
 
-**Current capability:** a Windows laptop measures its Wi-Fi link's signal strength
-in real time. Changes are shown relative to a quiet baseline. These measurements
-do not identify humans, count people, locate objects, or measure vital signs.
-ESP32 CSI provides richer motion measurements but still requires physical testing
-and a validated classifier before making human-presence claims.
+WiWave currently reads the connected Windows Wi-Fi adapter's RSSI (received signal strength) and reports changes against a quiet-room baseline. RSSI is not radar: it cannot reliably tell whether a person caused a change, count people, locate them, or identify objects. The 3D Observatory is a visualization; its people and scenarios are synthetic.
 
-## Start with your Windows laptop
+## Demo gallery
 
-Connect to Wi-Fi. Use Python 3.10+ and a Node version supported by the project's
-Vite release (Node 24 was used for this build).
+These original illustrations show the two main views. They are illustrative previews, not screenshots or sensor output. The Observatory figures are simulated.
+
+| Live Monitor | Observatory demo |
+| --- | --- |
+| ![Illustrative live monitor preview. It shows Wi-Fi RSSI measurements and explains that RSSI does not detect people.](assets/readme-live-monitor.svg) | ![Illustrative Observatory preview with explicitly simulated figures.](assets/readme-observatory-demo.svg) |
+| Real link-strength readings from the local adapter; changes are not human detections. | Synthetic room scene for exploring the interface; figures are not detections. |
+
+## Run on Windows
+
+Requirements: Python 3.10 or newer, Node.js compatible with the bundled Vite version, and an active Wi-Fi connection.
 
 ```powershell
-python -m venv .venv # Skip if already created
+python -m venv .venv # Skip if the virtual environment already exists
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Push-Location frontend
 npm ci
@@ -25,104 +27,60 @@ Pop-Location
 .\scripts\start-live.ps1
 ```
 
-Open **http://127.0.0.1:8000**. Keep the room quiet and the equipment stationary
-for the initial 20-second calibration. Confirm the **LIVE WI-FI** badge. Use
-**Workspace → Operations** to calibrate or record, and **Live Monitor** for detailed
-charts at `/monitor.html`.
+Open **http://127.0.0.1:8000** and check for the **LIVE WI-FI** badge. Leave the laptop and room undisturbed during the initial 20-second calibration. **Workspace → Operations** contains calibration and recording controls; **Live Monitor** opens the detailed charts at `/monitor.html`.
 
-Alternatively, set `WIWAVE_SOURCE=native_rssi`, `SIMULATION_MODE=false`, and run
-`.\.venv\Scripts\python.exe server.py`. For frontend development, keep the backend
-running and run `npm run dev` in `frontend`.
+For frontend development, keep the backend running and use `npm run dev` in `frontend`. To run the backend directly, set `WIWAVE_SOURCE=native_rssi` and `SIMULATION_MODE=false`, then run `python server.py` from the project root.
 
-## What is implemented
+## What works today
 
-- RuView Observatory room, orbit camera, visual settings and six style presets.
-- All twelve reference scenarios, explicitly labelled synthetic demonstrations.
-- Operations, devices, recordings, research links and feature-status workspace.
-- Replay with pause, seek and speed controls, preserving original data provenance.
-- Opt-in, time-bounded CSI amplitude trials with manual labels and JSONL export.
-- Optional connection to a separate RuView sensing server for compatible estimates.
-- Direct Windows Native Wi-Fi RSSI queries, outside the async request loop.
-- Robust baseline calibration, sustained-change detection, and reconnection.
-- Explicit hardware, stale, disconnected, calibrating, and simulation states.
-- WebSocket updates with bounded client queues and HTTP polling fallback.
-- Live charts, activity log, calibration control, recording, and CSV export.
-- Optional serial input for Espressif `csi_recv_router` CSV output.
-- No automatic simulation fallback or invented targets, ranges, or heartbeats.
+- Live Windows Native WLAN RSSI readings with explicit sensor health and source status.
+- Quiet-baseline calibration and sustained signal-change reporting.
+- Live monitor charts, activity log, local recording, CSV export, and replay.
+- Interactive RuView-derived 3D Observatory with visual settings and demo scenarios.
+- Optional labelled CSI amplitude capture from Espressif serial CSV, stored locally and exportable as JSON Lines.
+- Optional adapter for compatible estimates from a separately running RuView sensing service.
+- Bounded WebSocket updates and HTTP polling fallback.
 
-The circular field is an activity illustration, not a measured spatial map.
-The change score is a statistic, not a confidence percentage. The displayed read
-rate measures driver polling; the underlying adapter may refresh RSSI more slowly.
+There is no trained or locally validated people-detection model in this release. Historical modules under `multi_person/` and `motion_detector.py` are not part of the live detection path. Demo figures and scenes do not come from the sensor. The signal-change score is a statistic, not a detection-confidence percentage; the reported read rate is driver polling, not necessarily the radio's independent refresh rate.
 
-## Research and hardware setup
+## Optional CSI research setup
 
-- [Current implementation and remaining work](docs/PROJECT_STATUS.md)
-- [RuView feature comparison and connection protocol](docs/RUVIEW_PARITY.md)
-- [Research datasets, model sources and integration sequence](docs/DATASETS_AND_MODELS.md)
-- [Research findings, hardware comparison, and validation boundaries](docs/REALTIME_RESEARCH.md)
-- [Live setup, ESP32 connection, configuration, and room trials](docs/LIVE_SENSING_GUIDE.md)
+CSI (Channel State Information) provides richer wireless-channel measurements than laptop RSSI. It requires a compatible, programmed CSI receiver; the built-in Intel AC8265 adapter does not supply CSI to this application. WiWave's current Espressif serial parser accepts CSI CSV output. The capture workflow is for collecting room data, not a ready-made people detector.
 
-CSI mode needs `requirements-csi.txt`, compatible flashed hardware, a matching
-serial baud rate, and `WIWAVE_CSI_PORT`. No CSI hardware was attached during this
-implementation. Native laptop RSSI is currently supported on Windows; ESP32 serial
-input can be used on Windows, Linux, or macOS.
+1. Follow Espressif's official [`esp-csi` project](https://github.com/espressif/esp-csi) and [`csi_recv_router` setup](https://github.com/espressif/esp-csi/tree/master/examples/get-started/csi_recv_router) to configure a supported board and Wi-Fi link.
+2. Install the optional reader dependency with `python -m pip install -r requirements-csi.txt`.
+3. Connect the receiver over USB. On Windows, start it with `scripts/start-csi.ps1` (use `-Port COM3` if port detection needs help).
+4. In the app, open **Workspace → CSI data** to start a labelled trial, stop it, and export the resulting JSONL locally.
+5. Collect multiple labelled room sessions, then train and evaluate a task-specific model on held-out sessions before treating any output as a people-detection result.
 
-On Windows, after flashing `csi_recv_router` and installing the optional reader,
-run `scripts/start-csi.ps1`. It detects connected serial ports and starts a CSI-only
-server. It does not fall back to simulated readings if the board disconnects.
+CSI trials remain in the local SQLite database until exported. Capture starts only when explicitly requested in the UI. Review the [live sensing guide](docs/LIVE_SENSING_GUIDE.md) for setup and room-trial details.
 
 ## API
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/health` | Process and sensor health, provenance, read rate, data age |
-| `GET /api/poll` | Latest live snapshot with source capability flags |
-| `WS /ws/radar` | Same snapshot schema, published up to 10 Hz |
-| `GET /api/capabilities` | What the selected measurement source supports |
+| `GET /api/health` | Service and sensor health, source, sample age, and read rate |
+| `GET /api/poll` | Latest live snapshot and source capability flags |
+| `WS /ws/radar` | Live snapshots, published up to 10 Hz |
+| `GET /api/capabilities` | Capabilities of the selected measurement source |
 | `POST /api/calibrate` | Restart quiet-room calibration |
-| `POST /session/start` | Start recording measurements |
-| `POST /session/stop` | Stop recording |
-| `GET /sessions` | Most recent recording sessions |
-| `GET /session/{id}/export` | CSV export, including existing legacy sessions |
-| `GET /session/{id}/frames?limit=10000` | Bounded recorded snapshots for replay |
-| `GET /api/csi/trials` | List recent labelled CSI amplitude trials |
-| `POST /api/csi/trials/start` | Opt in to local CSI capture (10–180 seconds) |
-| `POST /api/csi/trials/label` | Label subsequent samples in an active trial |
-| `POST /api/csi/trials/stop` | Stop and flush the current CSI trial |
-| `GET /api/csi/trials/{id}/export` | Download labelled amplitude frames as JSON Lines |
-| `DELETE /api/csi/trials/{id}` | Remove a CSI trial and its local data |
+| `POST /session/start` · `POST /session/stop` | Start or stop a local recording |
+| `GET /sessions` | Recent recording sessions |
+| `GET /session/{id}/export` | Export a recording as CSV |
+| `GET /session/{id}/frames?limit=10000` | Bounded recording frames for replay |
+| `GET /api/csi/trials` | List labelled CSI trials |
+| `POST /api/csi/trials/start` · `POST /api/csi/trials/stop` | Start or stop an explicitly requested CSI trial |
+| `POST /api/csi/trials/label` | Change the label for subsequent CSI frames |
+| `GET /api/csi/trials/{id}/export` | Export trial frames as JSON Lines |
+| `DELETE /api/csi/trials/{id}` | Delete one trial and its local samples |
 
-Open **Workspace → CSI data** to start a short labelled capture and download JSONL.
-Trials stay in the local database unless you explicitly download a data file.
+## Project notes
 
-## Verification
+- [Current status and remaining work](docs/PROJECT_STATUS.md)
+- [Live sensing and room-trial guide](docs/LIVE_SENSING_GUIDE.md)
+- [RuView feature comparison](docs/RUVIEW_PARITY.md)
+- [Research datasets and model integration](docs/DATASETS_AND_MODELS.md)
+- [Real-time sensing research](docs/REALTIME_RESEARCH.md)
+- [RuView code license and provenance](frontend/observatory/PROVENANCE.md)
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest tests -q
-Push-Location frontend
-npm test
-npm run lint
-npm run build
-Pop-Location
-```
-
-Tests use deterministic samples and an explicitly simulated local test server.
-They verify software behavior, not human-detection accuracy. Real sensing must
-also be evaluated with labelled room trials.
-
-Existing `motion_detector.py`, `multi_person/`, and 3D components remain as
-historical research code. They do not drive the v5 live monitor. Existing database
-records are retained; new measurements use an additional `sensing_telemetry` table.
-
-Cloud hosts cannot measure your laptop's Wi-Fi. `render.yaml` runs a labelled demo.
-See the live guide for deployment and persistence constraints.
-
-Local CSI recordings stay inside the ignored SQLite database until you explicitly
-download a JSONL export. CSI collection requires a supported serial receiver and
-starting a labelled trial under **Workspace → CSI data**.
-
-The Observatory includes MIT-licensed RuView code with its
-[license and provenance](frontend/observatory/PROVENANCE.md). This release does
-not claim complete RuView platform parity or validated real-time human/object
-detection. Refer to the status document for the remaining hardware and model work.
+Cloud hosting cannot read the Wi-Fi adapter attached to your laptop. `render.yaml` runs a labelled demo. Local recordings are ignored by Git; source code and documentation are published to the repository.
