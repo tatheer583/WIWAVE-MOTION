@@ -19,11 +19,19 @@
 
 ---
 
+## 🔍 What is WiWave?
+
+**WiWave is an open-source WiFi radar and WiFi sensing application for Windows.** It turns the Wi-Fi radio already inside your laptop into a motion sensor — no cameras, no wearables, no extra hardware required. If you have ever searched for *"WiFi as a radar"*, *"WiFi motion detection"*, *"detect motion with WiFi"*, *"WiFi human presence detection"*, or *"device-free sensing"*, this project is a working, honest, local-first answer you can run in minutes.
+
+Under the hood WiWave performs real-time **RSSI motion detection** (received signal strength, ~10 samples/second, from the Windows Native Wi-Fi API) and includes a complete research pipeline for **CSI sensing** (Channel State Information) using a $5–10 **ESP32 CSI receiver**. It was built as a truthful alternative to the fake "WiFi radar" demos floating around the internet: every capability flag, label and chart says exactly what the radio can and cannot measure.
+
+**Use it as:** a WiFi radar dashboard · a wireless sensing research workbench · a room activity monitor · an ESP32 CSI data collector · a privacy-first alternative to cameras (it never records images or identifies anyone).
+
 ## 📸 See it live
 
 | Live Monitor — real hardware | CSI Subcarrier Waterfall | 3D Observatory |
 | --- | --- | --- |
-| ![Live Wi-Fi monitor showing real RSSI, neighbor links, spectral analysis and the event journal](assets/readme-live-monitor.png) | ![Subcarrier amplitude waterfall](assets/readme-csi-waterfall.png) | ![Observatory multi-person demo scenario](assets/readme-observatory-demo.png) |
+| ![WiFi motion detection dashboard showing live RSSI, neighbor access point links, spectral analysis and the event journal on real Windows hardware](assets/readme-live-monitor.png) | ![ESP32 CSI channel state information subcarrier amplitude waterfall heatmap](assets/readme-csi-waterfall.png) | ![WiFi sensing 3D observatory room visualization with simulated multi-person tracking](assets/readme-observatory-demo.png) |
 | Your laptop's actual Wi-Fi adapter, ~10 readings/second | Subcarrier-level CSI view (demo data shown; real with an ESP32) | Explorable room scene with 12 scenarios |
 
 ▶ **[Watch the demo video](assets/demo_video.mp4)**
@@ -124,6 +132,23 @@ The detector uses robust statistics (median + MAD, not mean/std), requires chang
 - [ ] Train a first motion-vs-quiet model on collected labelled trials
 - [ ] Linux/macOS native sources (Windows is implemented)
 - [ ] Multiple receiver nodes for triangulation research
+
+## ❓ FAQ — the questions everyone asks about WiFi radar
+
+**Can Wi-Fi really work as a radar?**
+Partly. Wi-Fi motion detection is real and actively researched (IEEE 802.11bf standardizes it), but consumer Wi-Fi hardware exposes only coarse measurements. WiWave extracts the maximum honest signal from them: multi-link RSSI fusion, spectral analysis, and calibrated change detection — while a $5 ESP32 unlocks true CSI-grade sensing research.
+
+**Can Wi-Fi detect a person through walls?**
+Not reliably with laptop hardware, and WiWave does not claim to. Research systems (RF-Pose, RSSI/CSI arrays) need engineered setups and trained models. What your laptop *can* do — today, with this app — is detect that the radio environment changed, and show you exactly how much it can be trusted.
+
+**Does this identify people or record video?**
+No. There is no camera, no microphone, no identity inference, and no data leaves your machine. That's the point: motion *evidence* without surveillance.
+
+**What hardware do I need?**
+None to start — any Windows laptop with Wi-Fi works in full mode. Add an ESP32 board (~$5–10) for the CSI research features. See the [hardware guide](docs/HARDWARE_GUIDE.md).
+
+**Is this like commercial WiFi presence detection?**
+Commercial products (mesh-router motion features, occupancy sensors) use multiple coordinated nodes and proprietary models. WiWave is the open, single-device version: real measurements, visible internals, and zero marketing fog about what the numbers mean.
 
 ## ⚠️ What WiWave does **not** do
 
