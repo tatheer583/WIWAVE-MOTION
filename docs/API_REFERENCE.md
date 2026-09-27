@@ -5,6 +5,25 @@
 > Legacy multi-person, position and vital-sign claims below do not describe the
 > current live pipeline. See [project status](PROJECT_STATUS.md).
 
+## v6 additions (current live server)
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/events?limit=50` | Event journal summaries (started/ended, duration, peak score, source, stop reason) |
+| `GET /api/events/{id}` | Full event with bounded `pre_frames` / `post_frames` context |
+| `DELETE /api/events/{id}` | Remove one event record |
+| `GET /api/alerts` · `POST /api/alerts {"enabled": bool}` | Optional local Windows toast alerts on sustained changes |
+| `GET /api/csi/trials/{id}/analysis` | Per-label frame counts, mean activity, mean spectra, per-subcarrier F-statistics |
+
+Snapshot fields added in v6: `links` (neighbor BSSIDs with `rssi_dbm`, `signal`,
+`channel`, `ssid`, `age_s`), `link_change` (per-channel change percentages),
+`spectral` (`slow_oscillation`, `mid_activity`, `fast_activity`, `dominant_hz`,
+`spectral_entropy`, `window_s`), `csi_preview` (up to 64 downsampled amplitudes when
+a CSI stream is present), and `alerts_enabled`. `is_simulation` is true for both the
+`simulation` and `csi_simulation` sources. The synthetic CSI source is selected with
+`WIWAVE_SOURCE=csi_simulation`; the neighbor polling cadence is configured with
+`WIWAVE_LINK_POLL_SECONDS` (seconds, default 30, 0 disables).
+
 ## Base URL
 
 ```
