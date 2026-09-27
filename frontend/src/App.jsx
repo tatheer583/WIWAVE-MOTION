@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Activity, ArrowDownToLine, Circle, Cpu, Radio, RotateCcw, Wifi, Waves } from 'lucide-react';
 import { useRadarWebSocket } from './hooks/useRadarWebSocket';
+import { LinksPanel, SpectralPanel, EventsJournal, AlertsToggle, WaterfallPanel } from './components/EnvironmentPanels';
 import './App.css';
 
 const labels = { waiting: 'Waiting for sensor', calibrating: 'Learning the room', quiet: 'Signal is stable',
@@ -28,8 +29,9 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [sessions, setSessions] = useState([]);
   const available = data.system_status === 'ok';
-  const isCsi = data.source === 'esp32_csi';
-  const sourceName = data.is_simulation ? 'Synthetic demo' : isCsi ? 'ESP32 · CSI' : 'Laptop · RSSI';
+  const isCsi = data.source === 'esp32_csi' || data.source === 'csi_simulation';
+  const sourceName = data.is_simulation ? (data.source === 'csi_simulation' ? 'Synthetic CSI demo' : 'Synthetic demo')
+    : isCsi ? 'ESP32 · CSI' : 'Laptop · RSSI';
   const title = labels[data.state] || 'Waiting for sensor';
   const loadSessions = async () => {
     try {
@@ -43,11 +45,11 @@ export default function App() {
       .then(rows => { if (active) setSessions(rows); }).catch(() => {});
     return () => { active = false; };
   }, [data.recording]);
-  const action = async path => {
+  const action = async (path, options) => {
     setBusy(true);
     setNotice('');
     try {
-      const response = await fetch(`${base}${path}`, { method: 'POST' });
+      const response = await fetch(`${base}${path}`, { method: 'POST', ...(options || {}) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || 'Request failed');
       setNotice(result.message);
@@ -55,11 +57,15 @@ export default function App() {
     } catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
   };
+  const toggleAlerts = () => action('/api/alerts', {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !data.alerts_enabled }),
+  });
 
   return <div className="workspace">
     <aside className="sidebar">
       <a className="brand" href="/" aria-label="Open WiWave Observatory"><Waves size={29} /><span>wiwave<span className="brand-dot">.</span></span></a>
-      <div className="workspace-label">SENSING WORKSPACE <span>05</span></div>
+      <div className="workspace-label">SENSING WORKSPACE <span>06</span></div>
       <div className="nav-active"><Radio size={18} /> Live monitor <span className="live-dot" /></div>
       <div className="sidebar-section"><p className="eyebrow">CONNECTED SOURCE</p><div className="source-icon"><Wifi size={22} /></div>
         <h3>{sourceName}</h3><p className="muted">{data.adapter || 'Connecting to your receiver…'}</p>
@@ -73,7 +79,7 @@ export default function App() {
         <div><span className="cap-dot" /> Position & distance</div>
         <p className="muted small">Unmeasured capabilities remain unavailable.</p>
       </div>
-      <div className="sidebar-bottom"><span className="tiny-square" /> LOCAL-FIRST SENSING<span>v5.0</span></div>
+      <div className="sidebar-bottom"><span className="tiny-square" /> LOCAL-FIRST SENSING<span>v6.0</span></div>
     </aside>
 
     <main className="main-content">
@@ -103,7 +109,10 @@ export default function App() {
           <h2 aria-live="polite">{title}</h2><p className="state-description">{data.error || (data.state === 'calibrating' ? 'Keep the room quiet and your laptop and router stationary while the baseline is learned.' : data.motion_detected ? (isCsi ? 'Channel changes may indicate movement. Human presence has not been verified.' : 'The Wi-Fi link changed. Movement, interference, or receiver changes can cause this.') : available ? 'Monitoring changes relative to your quiet-room baseline. A stable signal does not prove the room is empty.' : 'Connect your Wi-Fi adapter or configured CSI receiver to resume live monitoring.')}</p>
           <div className="meter-label"><span>{data.state === 'calibrating' ? 'Calibration' : 'Signal change score'}</span><strong>{data.state === 'calibrating' ? `${Math.round(data.learning_progress * 100)}%` : `${Math.round(data.change_score)} / 100`}</strong></div>
           <div className="meter"><div style={{ width: `${data.state === 'calibrating' ? data.learning_progress * 100 : data.change_score}%` }} /></div>
-          <button className="button calibrate" disabled={busy || !available} onClick={() => action('/api/calibrate')}><RotateCcw size={15} /> Calibrate quiet room</button>
+          <div className="detection-buttons">
+            <button className="button calibrate" disabled={busy || !available} onClick={() => action('/api/calibrate')}><RotateCcw size={15} /> Calibrate quiet room</button>
+            <AlertsToggle enabled={data.alerts_enabled} busy={busy} onToggle={() => toggleAlerts()} />
+          </div>
           <div className="unavailable-metrics"><div><span>PEOPLE</span><strong>—</strong></div><div><span>RANGE</span><strong>—</strong></div><div><span>EVENTS</span><strong>{data.event_count}</strong></div></div>
           <p className="small muted">{isCsi ? 'CSI motion detection is experimental and needs testing in this room.' : 'Add an ESP32 CSI receiver for richer motion measurements.'}</p>
         </section>
@@ -112,6 +121,14 @@ export default function App() {
       <section className="panel telemetry-panel"><div className="panel-heading"><div><p className="eyebrow">LIVE TELEMETRY</p><h2>The signal, over time</h2></div><span className="legend"><span className="live-dot" /> RSSI <i /> Change score</span></div>
         <div className="charts"><Trace history={history} field="rssi" min={-100} max={-20} label="Signal strength" unit="dBm" /><Trace history={history} field="score" min={0} max={100} label="Baseline deviation" unit="" /></div>
       </section>
+
+      {data.csi_preview && <WaterfallPanel data={data} />}
+
+      <div className="environment-grid">
+        <LinksPanel links={data.links} />
+        <SpectralPanel spectral={data.spectral} />
+        <EventsJournal base={base} />
+      </div>
 
       <div className="bottom-grid"><section className="panel events-panel"><div className="panel-heading"><h2>Activity log</h2><span className="tag">THIS CONNECTION</span></div>
         {events.length ? <ul className="event-list">{events.map((event, i) => <li key={`${event.at}-${i}`}><span className="event-marker" /><span>{labels[event.state] || event.state}</span><time>{event.at}</time></li>)}</ul> : <p className="muted">Sensor transitions will appear here.</p>}

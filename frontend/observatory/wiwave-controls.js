@@ -84,7 +84,7 @@ export class WorkspaceControls {
         <div class="workspace-actions"><button id="trial-start">Start CSI trial</button><button id="trial-label-mark">Apply label to new frames</button><button id="trial-stop">Stop trial</button></div>
         <p id="trial-status" role="status">CSI trials are opt-in and require a connected CSI stream.</p>
         <p class="workspace-muted">Starts storing up to 10 CSI amplitude frames/s in the local SQLite database (maximum 180 seconds, 512 amplitudes/frame and 15,000 total samples). Labels describe the room condition you observe; they do not create model predictions. Signed I/Q phase, BSSID, and person identity are not stored. Shared participant data should be collected only with consent. Download or remove trials below.</p>
-        <div id="csi-trial-list"></div>`;
+        <div id="csi-trial-list"></div><div id="trial-analysis"></div>`;
       el('trial-start').onclick = () => this.startCsiTrial();
       el('trial-label-mark').onclick = () => this.labelCsiTrial();
       el('trial-stop').onclick = () => this.stopCsiTrial();
@@ -96,7 +96,7 @@ export class WorkspaceControls {
         <p class="workspace-muted">These datasets are research inputs, not proof that a model will work on this laptop’s RSSI. Model weights and training datasets have not been installed. See docs/DATASETS_AND_MODELS.md in the repository.</p>`;
     } else {
       content.innerHTML = `<p class="workspace-intro">Implemented features and hardware dependencies</p><table class="feature-table"><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
-        <tr><td>RuView Observatory scene, camera, style presets, rendering settings</td><td>Implemented</td></tr><tr><td>All 12 upstream scenarios</td><td>Explicit synthetic demos</td></tr><tr><td>Windows live RSSI, calibration, signal changes</td><td>Implemented · hardware tested</td></tr><tr><td>Record, CSV export, timed replay, speed and seeking</td><td>Implemented locally</td></tr><tr><td>ESP32 CSV CSI capture</td><td>Implemented · needs hardware test</td></tr><tr><td>RuView WebSocket connection</td><td>Implemented · protocol tested</td></tr><tr><td>Person counts, 17-keypoint pose, vital signs, fall estimates</td><td>Requires compatible CSI engine; unvalidated</td></tr><tr><td>Object identity, measured range, through-wall localization</td><td>Not implemented</td></tr><tr><td>Training, firmware flashing, multi-node provisioning, edge modules</td><td>Use upstream tools; not integrated</td></tr></tbody></table>`;
+        <tr><td>RuView Observatory scene, camera, style presets, rendering settings</td><td>Implemented</td></tr><tr><td>All 12 upstream scenarios</td><td>Explicit synthetic demos</td></tr><tr><td>Windows live RSSI, calibration, signal changes</td><td>Implemented · hardware tested</td></tr><tr><td>Multi-link monitoring (neighbor access points as slow channels)</td><td>Implemented · hardware tested</td></tr><tr><td>Spectral band statistics on the live signal</td><td>Implemented · descriptive only</td></tr><tr><td>Event journal with before/after context</td><td>Implemented · local SQLite</td></tr><tr><td>Record, CSV export, timed replay, speed and seeking</td><td>Implemented locally</td></tr><tr><td>CSI waterfall heatmap and labelled trial analysis</td><td>Implemented · needs ESP32 hardware test</td></tr><tr><td>RuView WebSocket connection</td><td>Implemented · protocol tested</td></tr><tr><td>Person counts, 17-keypoint pose, vital signs, fall estimates</td><td>Requires compatible CSI engine; unvalidated</td></tr><tr><td>Object identity, measured range, through-wall localization</td><td>Not implemented</td></tr><tr><td>Training, firmware flashing, multi-node provisioning, edge modules</td><td>Use upstream tools; not integrated</td></tr></tbody></table>`;
     }
     this.lastUpdate = 0;
   }
@@ -163,6 +163,9 @@ export class WorkspaceControls {
         if (trial.end_time && trial.sample_count > 0) {
           const download = document.createElement('a'); download.href = `/api/csi/trials/${Number(trial.id)}/export`; download.textContent = 'Download JSONL'; download.download = '';
           row.append(download);
+          const analyze = document.createElement('button'); analyze.textContent = 'Analyze';
+          analyze.onclick = () => this.analyseCsiTrial(Number(trial.id), analyze);
+          row.append(analyze);
         }
         if (trial.end_time) {
           const remove = document.createElement('button'); remove.textContent = 'Delete';
@@ -180,6 +183,26 @@ export class WorkspaceControls {
       list.prepend(capacity);
       if (!result.trials.length) list.textContent = 'No CSI trials saved. Connect a CSI device to enable collection.';
     } catch (error) { if (token === this.requestId) show('trial-status', error.message); }
+  }
+  async analyseCsiTrial(id, button) {
+    button.disabled = true;
+    const area = el('trial-analysis');
+    try {
+      const result = await api(`/api/csi/trials/${id}/analysis`);
+      const rows = result.labels.map(label => `<tr><td>${label.label}</td><td>${label.frames}</td><td>${label.mean_activity.toFixed(4)}</td></tr>`).join('');
+      let separation = '';
+      if (result.separation) {
+        const top = result.separation.top_subcarriers
+          .map(item => `<li>subcarrier ${item.subcarrier} · F = ${item.f_statistic.toFixed(2)}</li>`).join('');
+        separation = `<h4>Label separation (per-subcarrier F-statistic)</h4><p>max F = ${result.separation.max_f.toFixed(2)} · median F = ${result.separation.median_f.toFixed(2)}</p><ul>${top}</ul>`;
+      } else {
+        separation = '<p class="workspace-muted">Collect at least two different labels to compare them.</p>';
+      }
+      area.innerHTML = `<h4>Trial #${id} analysis · ${result.frames_analyzed} frames · ${result.subcarriers} subcarriers</h4>
+        <table class="feature-table"><thead><tr><th>Label</th><th>Frames</th><th>Mean frame-to-frame activity</th></tr></thead><tbody>${rows}</tbody></table>
+        ${separation}<p class="workspace-muted">${result.note}</p>`;
+    } catch (error) { show('trial-status', error.message); }
+    finally { button.disabled = false; }
   }
   async loadReplay(id, button) {
     const token = ++this.requestId; button.disabled = true;
