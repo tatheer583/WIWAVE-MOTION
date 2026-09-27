@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import random
 import time
 
 
@@ -110,6 +111,40 @@ class DemoSource:
         pass
 
 
+class CsiDemoSource:
+    """Synthetic multi-subcarrier stream for developing and demonstrating the
+    CSI waterfall and trial tools without hardware. Every consumer must keep
+    this source labelled as simulation; it produces no real measurements."""
+    source = 'csi_simulation'
+    SUBCARRIERS = 52
+
+    def __init__(self):
+        self.started = time.monotonic()
+        rng = random.Random(20260927)
+        self.base = [18 + 14 * rng.random() for _ in range(self.SUBCARRIERS)]
+        self.rng = random.Random(rng.random())
+
+    def read(self):
+        t = time.monotonic() - self.started
+        burst = t % 45 > 38
+        breathing = math.sin(2 * math.pi * 0.2 * t)
+        amplitudes = []
+        for i, base in enumerate(self.base):
+            value = base + 0.6 * self.rng.random() * math.sin(t * 3.1 + i)
+            if i % 7 == 3:
+                value += 2.4 * breathing
+            if burst:
+                value += 4.5 * math.sin(2 * math.pi * 2.5 * t + i * 0.7) + 2.0 * self.rng.random()
+            amplitudes.append(round(max(1.0, value), 2))
+        rssi = -58 + (0.4 * math.sin(0.11 * t)) - (2.5 if burst else 0.0) + 0.15 * self.rng.random()
+        return {'source': self.source, 'rssi_dbm': round(rssi, 1), 'signal': max(0, min(100, 2 * (rssi + 100))),
+                'channel': 6, 'link_id': 'demo-csi', 'amplitudes': amplitudes,
+                'adapter': 'Synthetic CSI demo', 'ssid': None}
+
+    def close(self):
+        pass
+
+
 class UnavailableSource:
     source = 'unavailable'
 
@@ -126,13 +161,15 @@ def create_source():
         mode = 'simulation'
     if mode == 'simulation':
         return DemoSource()
+    if mode == 'csi_simulation':
+        return CsiDemoSource()
     if mode == 'esp32_csi':
         port = os.getenv('WIWAVE_CSI_PORT')
         if not port:
             raise ValueError('WIWAVE_CSI_PORT is required for esp32_csi')
         return SerialCsiSource(port, int(os.getenv('WIWAVE_CSI_BAUD', '115200')))
     if mode != 'native_rssi':
-        raise ValueError('WIWAVE_SOURCE must be native_rssi, esp32_csi, or simulation')
+        raise ValueError('WIWAVE_SOURCE must be native_rssi, csi_simulation, esp32_csi, or simulation')
     if platform.system() != 'Windows':
         return UnavailableSource()
     from sensing.windows import NativeWifiSource

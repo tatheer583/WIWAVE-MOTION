@@ -26,10 +26,18 @@ class ChangeDetector:
         self.quiet_since = None
         self.active = False
         self.events = 0
+        self.last_channel_z = None
+        self.last_was_csi = False
 
     def update(self, sample, now):
         is_csi = sample.get('amplitudes') is not None
-        values = np.asarray(sample['amplitudes'] if is_csi else [sample['rssi_dbm']], dtype=float)
+        if is_csi:
+            values = np.asarray(sample['amplitudes'], dtype=float)
+        else:
+            # Primary link first; neighbor access points from the scan cache are
+            # extra slow channels. All values share dBm units.
+            links = [link for link in sample.get('links') or [] if link.get('rssi_dbm') is not None]
+            values = np.asarray([sample['rssi_dbm']] + [link['rssi_dbm'] for link in links], dtype=float)
         if values.ndim != 1 or not len(values) or not np.all(np.isfinite(values)):
             raise ValueError('Sensor values must be a finite vector')
         if is_csi:
@@ -67,7 +75,17 @@ class ChangeDetector:
         # cannot trigger, and scalar receiver gain is normalized for CSI.
         excursion = np.percentile(np.abs(recent - self.center), 75, axis=0)
         spread = 1.4826 * np.median(np.abs(recent - np.median(recent, axis=0)), axis=0)
-        z = float(np.median(np.maximum(excursion, spread) / self.noise))
+        channel_z = np.maximum(excursion, spread) / self.noise
+        if is_csi:
+            z = float(np.median(channel_z))
+        elif channel_z.size > 1:
+            # Primary link is the fast, sensitive channel; neighbor links vote
+            # as slow confirmation so one noisy neighbor cannot trigger alone.
+            z = float(max(channel_z[0], 0.9 * float(np.median(channel_z[1:]))))
+        else:
+            z = float(channel_z[0])
+        self.last_channel_z = channel_z
+        self.last_was_csi = is_csi
         score = min(100.0, max(0.0, z / 6.0 * 100.0))
         if z >= 3.0:
             self.quiet_since = None
@@ -91,6 +109,9 @@ class ChangeDetector:
     def result(self, state, progress, score):
         times = [row[0] for row in self.history]
         rate = (len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 else 0.0
+        links = None
+        if self.last_channel_z is not None and not self.last_was_csi and self.last_channel_z.size > 1:
+            links = [round(min(100.0, max(0.0, float(z) / 6.0 * 100.0)), 1) for z in self.last_channel_z]
         return {
             'state': state, 'learning_progress': round(progress, 3),
             'change_score': round(score, 1), 'motion_detected': self.active,
@@ -98,4 +119,5 @@ class ChangeDetector:
             'event_count': self.events,
             'baseline_rssi_dbm': round(float(self.center[0]), 1)
             if self.center is not None and len(self.center) == 1 else None,
+            'link_change': links,
         }

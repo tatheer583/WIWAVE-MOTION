@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import csv
+from collections import deque
 from datetime import datetime, timezone
 import io
 import json
@@ -16,9 +17,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import numpy as np
 import uvicorn
 from sensing.detector import ChangeDetector
 from sensing.sources import create_source
+from sensing.spectral import SpectralAnalyzer
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = os.getenv('WIWAVE_DB_PATH', str(ROOT / 'wiwave_sessions.db'))
@@ -38,6 +41,7 @@ class Runtime:
     def __init__(self, source):
         self.source = source
         self.detector = ChangeDetector(CALIBRATION_SECONDS)
+        self.spectral = SpectralAnalyzer(rate_hz=READ_RATE)
         self.last_received = None
         self.latest = {}
         self.error = None
@@ -51,11 +55,19 @@ class Runtime:
         self.csi_queue = asyncio.Queue(maxsize=100)
         self.csi_trial = None
         self.csi_trial_error = None
+        self.recent_frames = deque(maxlen=300)
+        self.event_frames = []
+        self.pending_event = None
+        self.event_started_mono = None
+        self.prev_motion = False
+        self.event_queue = asyncio.Queue(maxsize=20)
+        self.alerts_enabled = os.getenv('WIWAVE_ALERTS', '0').lower() in {'1', 'true', 'yes'}
 
     def snapshot(self):
         age = time.monotonic() - self.last_received if self.last_received is not None else None
         fresh = age is not None and age < 3 and self.error is None
         state = self.latest.get('state', 'waiting') if fresh else 'disconnected' if self.error else 'stale' if age is not None else 'waiting'
+        synthetic = self.source.source in ('simulation', 'csi_simulation')
         result = {'type': 'radar_update', 'sequence': self.sequence, 'timestamp': None,
                   'signal': None, 'rssi_dbm': None, 'rtt': None, 'variance': 0,
                   'learning_progress': 0, 'change_score': 0, 'motion_detected': False,
@@ -63,17 +75,23 @@ class Runtime:
         result.update({
             'state': state, 'status': state.replace('_', ' ').upper(),
             'system_status': 'ok' if fresh else state, 'source': self.source.source,
-            'is_simulation': self.source.source == 'simulation',
+            'is_simulation': synthetic,
             'sample_age_ms': round(age * 1000) if age is not None else None,
             'error': self.error, 'invalid_frames': self.invalid_frames,
+            'links': self.latest.get('links', []),
+            'spectral': self.latest.get('spectral') if fresh else None,
+            'csi_preview': self.latest.get('csi_preview') if fresh else None,
             'distance': None, 'bpm': None, 'person_count': None, 'persons': [],
             'multi_person_mode': 'unavailable', 'active_zone': 'Unknown',
             'capabilities': {'signal_monitoring': self.source.source != 'unavailable',
-                             'csi': self.source.source == 'esp32_csi', 'human_detection': False,
+                             'csi': self.source.source in ('esp32_csi', 'csi_simulation'),
+                             'multi_link': self.source.source == 'native_rssi',
+                             'human_detection': False,
                              'person_count': False, 'localization': False,
                              'object_classification': False, 'vital_signs': False},
             'recording': self.session_id is not None, 'session_id': self.session_id,
             'recording_error': self.recording_error,
+            'alerts_enabled': self.alerts_enabled,
             'csi_trial': ({'id': self.csi_trial['id'], 'active': self.csi_trial['active'],
                            'label': self.csi_trial['label'], 'samples': self.csi_trial['samples'],
                            'dropped': self.csi_trial['dropped']}
@@ -82,6 +100,86 @@ class Runtime:
         if not fresh:
             result.update(motion_detected=False, change_score=0, read_rate_hz=0, signal=None, rssi_dbm=None)
         return result
+
+    def observe_event(self, detection, now):
+        """Track detector transitions into bounded pre/post event records."""
+        motion = bool(detection.get('motion_detected'))
+        frame = {'ts': self.latest.get('timestamp'), 'r': self.latest.get('rssi_dbm'),
+                 's': detection.get('change_score'), 'st': detection.get('state')}
+        self.recent_frames.append(frame)
+        if motion and not self.prev_motion:
+            links = self.latest.get('links') or []
+            self.pending_event = {
+                'started_at': self.latest.get('timestamp'), 'source': self.source.source,
+                'channel': self.latest.get('channel'), 'baseline_dbm': detection.get('baseline_rssi_dbm'),
+                'peak_change_score': detection.get('change_score', 0),
+                'neighbor_links': len(links),
+                'pre_frames': [dict(f) for f in tuple(self.recent_frames)[:-1]],
+                'post_frames': [],
+            }
+            self.event_frames = [frame]
+            self.event_started_mono = now
+            if self.alerts_enabled:
+                asyncio.create_task(self.fire_alert())
+        elif motion and self.pending_event:
+            self.pending_event['peak_change_score'] = max(self.pending_event['peak_change_score'],
+                                                          detection.get('change_score', 0))
+            if len(self.event_frames) < 300:
+                self.event_frames.append(frame)
+        elif not motion and self.prev_motion and self.pending_event:
+            event = self.pending_event
+            event['ended_at'] = self.latest.get('timestamp')
+            event['duration_s'] = round(now - self.event_started_mono, 2) if self.event_started_mono else None
+            event['post_frames'] = self.event_frames[1:]
+            self.pending_event = None
+            self.event_frames = []
+            with suppress(asyncio.QueueFull):
+                self.event_queue.put_nowait(event)
+        self.prev_motion = motion
+
+    def interrupt_event(self):
+        """Close an open event record when the sensor fails mid-event."""
+        if not self.pending_event:
+            return
+        event = self.pending_event
+        event['ended_at'] = self.latest.get('timestamp')
+        event['duration_s'] = round(time.monotonic() - self.event_started_mono, 2) if self.event_started_mono else None
+        event['stop_reason'] = 'sensor_interrupted'
+        event['post_frames'] = self.event_frames[1:]
+        self.pending_event = None
+        self.event_frames = []
+        with suppress(asyncio.QueueFull):
+            self.event_queue.put_nowait(event)
+
+    async def fire_alert(self):
+        script = ROOT / 'scripts' / 'alert.ps1'
+        if not script.exists():
+            return
+        with suppress(Exception):
+            await asyncio.create_subprocess_exec(
+                'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script),
+                '-Title', 'WiWave signal change', '-Body', 'A sustained Wi-Fi signal change was detected.',
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+
+    async def write_events(self):
+        while True:
+            event = await self.event_queue.get()
+            await self.write_one_event(event)
+
+    async def write_one_event(self, event):
+        async with self.db_lock:
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        'INSERT INTO events (started_at,ended_at,duration_s,peak_change_score,source,channel,baseline_dbm,neighbor_links,stop_reason,pre_frames,post_frames) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                        (event.get('started_at'), event.get('ended_at'), event.get('duration_s'),
+                         event.get('peak_change_score'), event.get('source'), event.get('channel'),
+                         event.get('baseline_dbm'), event.get('neighbor_links'),
+                         event.get('stop_reason'), json.dumps(event.get('pre_frames', [])[-300:], allow_nan=False),
+                         json.dumps(event.get('post_frames', [])[-300:], allow_nan=False)))
+                    await db.commit()
+            except Exception:
+                pass
 
     async def acquire(self):
         while True:
@@ -96,8 +194,15 @@ class Runtime:
                     self.latest.update(detection, sequence=self.sequence, timestamp=utc_now(),
                                        amplitudes_ready=sample.get('amplitudes') is not None,
                                        subcarrier_count=len(sample['amplitudes']) if sample.get('amplitudes') is not None else None)
+                    stats = self.spectral.update(now, sample.get('rssi_dbm'))
+                    if stats is not None:
+                        self.latest['spectral'] = stats
+                    if sample.get('amplitudes'):
+                        step = max(1, round(len(sample['amplitudes']) / 64))
+                        self.latest['csi_preview'] = [round(float(v), 2) for v in sample['amplitudes'][::step][:64]]
                     self.last_received = now
                     self.error = None
+                    self.observe_event(detection, now)
                     trial = self.csi_trial
                     if trial and trial['active'] and sample.get('amplitudes') is not None:
                         if now >= trial['deadline']:
@@ -122,9 +227,11 @@ class Runtime:
             except ValueError as exc:
                 self.invalid_frames += 1
                 self.error = str(exc)
+                self.interrupt_event()
             except Exception as exc:
                 self.error = str(exc)
                 self.detector.reset()
+                self.interrupt_event()
                 with suppress(Exception):
                     await asyncio.to_thread(self.source.close)
                 await asyncio.sleep(1)
@@ -223,6 +330,8 @@ async def init_db():
         await db.execute('CREATE TABLE IF NOT EXISTS csi_trials (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, initial_label TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT, stop_reason TEXT, sample_count INTEGER NOT NULL DEFAULT 0, dropped_samples INTEGER NOT NULL DEFAULT 0)')
         await db.execute('CREATE TABLE IF NOT EXISTS csi_trial_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, trial_id INTEGER NOT NULL, timestamp TEXT NOT NULL, sequence INTEGER NOT NULL, label TEXT NOT NULL, rssi_dbm REAL, channel INTEGER, subcarrier_count INTEGER NOT NULL, amplitudes TEXT NOT NULL, truncated INTEGER NOT NULL, FOREIGN KEY(trial_id) REFERENCES csi_trials(id))')
         await db.execute('CREATE INDEX IF NOT EXISTS csi_trial_sample_idx ON csi_trial_samples(trial_id,id)')
+        await db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, ended_at TEXT, duration_s REAL, peak_change_score REAL, source TEXT, channel INTEGER, baseline_dbm REAL, neighbor_links INTEGER, stop_reason TEXT, pre_frames TEXT NOT NULL, post_frames TEXT NOT NULL)')
+        await db.execute('CREATE INDEX IF NOT EXISTS events_started_idx ON events(started_at)')
         await db.execute("UPDATE csi_trials SET end_time=?,stop_reason='server_restarted' WHERE end_time IS NULL", (utc_now(),))
         await db.commit()
 
@@ -232,7 +341,9 @@ async def lifespan(app):
     await init_db()
     runtime = Runtime(create_source())
     app.state.runtime = runtime
-    tasks = [asyncio.create_task(runtime.acquire()), asyncio.create_task(runtime.publish()), asyncio.create_task(runtime.record()), asyncio.create_task(runtime.record_csi_trials())]
+    tasks = [asyncio.create_task(runtime.acquire()), asyncio.create_task(runtime.publish()),
+             asyncio.create_task(runtime.record()), asyncio.create_task(runtime.record_csi_trials()),
+             asyncio.create_task(runtime.write_events())]
     try:
         yield
     finally:
@@ -242,6 +353,13 @@ async def lifespan(app):
             deadline = time.monotonic() + 3
             while runtime.csi_trial and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
+        if runtime.pending_event:
+            runtime.interrupt_event()
+            try:
+                event = await asyncio.wait_for(runtime.event_queue.get(), timeout=2)
+                await runtime.write_one_event(event)
+            except Exception:
+                pass
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -252,7 +370,7 @@ async def lifespan(app):
                 await db.commit()
 
 
-app = FastAPI(title='WiWave Live Sensing', version='5.0.0', lifespan=lifespan)
+app = FastAPI(title='WiWave Live Sensing', version='6.0.0', lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=['GET', 'POST'], allow_headers=['Content-Type'])
 
 
@@ -270,7 +388,7 @@ async def health():
     runtime = app.state.runtime
     snapshot = runtime.snapshot()
     return {'status': 'ok' if snapshot['system_status'] == 'ok' else 'degraded',
-            'version': '5.0.0', 'engine': runtime.source.source,
+            'version': '6.0.0', 'engine': runtime.source.source,
             'is_simulation': snapshot['is_simulation'], 'sensor_state': snapshot['state'],
             'sample_age_ms': snapshot['sample_age_ms'], 'read_rate_hz': snapshot['read_rate_hz'],
             'started_at': runtime.started, 'has_payload': runtime.sequence > 0,
@@ -393,6 +511,65 @@ async def export_csi_trial(trial_id: int):
                              headers={'Content-Disposition': f'attachment; filename=wiwave_csi_trial_{trial_id}.jsonl'})
 
 
+@app.get('/api/csi/trials/{trial_id}/analysis')
+async def analyse_csi_trial(trial_id: int):
+    """Descriptive per-label statistics over stored amplitude frames. A one-way
+    F-statistic per subcarrier shows how much labels differ; it is not a human
+    detection result and carries no identity information."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT id FROM csi_trials WHERE id=?', (trial_id,)) as cursor:
+            if await cursor.fetchone() is None:
+                raise HTTPException(404, 'CSI trial not found')
+        async with db.execute('SELECT label, amplitudes FROM csi_trial_samples WHERE trial_id=? ORDER BY id LIMIT 10000',
+                              (trial_id,)) as cursor:
+            rows = await cursor.fetchall()
+    if not rows:
+        raise HTTPException(409, 'This trial has no samples to analyse.')
+    parsed = []
+    for label, raw in rows:
+        try:
+            amplitudes = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(amplitudes, list) and amplitudes:
+            parsed.append((label, np.asarray(amplitudes, dtype=float)))
+    if not parsed:
+        raise HTTPException(409, 'No parsable CSI frames in this trial.')
+    lengths = {}
+    for _, vector in parsed:
+        lengths[len(vector)] = lengths.get(len(vector), 0) + 1
+    length = max(lengths, key=lengths.get)
+    frames = [(label, vector) for label, vector in parsed if len(vector) == length]
+    by_label = {}
+    for label, vector in frames:
+        by_label.setdefault(label, []).append(vector)
+    labels = []
+    for label, vectors in by_label.items():
+        stacked = np.stack(vectors)
+        labels.append({'label': label, 'frames': len(vectors),
+                       'mean_activity': round(float(np.mean(np.abs(np.diff(stacked, axis=0)))) if len(vectors) > 1 else 0.0, 4),
+                       'mean_amplitudes': [round(float(value), 2)
+                                           for value in stacked.mean(axis=0)[::max(1, length // 64)][:64]]})
+    separation = None
+    if len(by_label) >= 2:
+        data = np.stack([vector for _, vector in frames])
+        names = np.array([label for label, _ in frames])
+        groups = [data[names == name] for name in by_label]
+        grand = data.mean(axis=0)
+        between = sum(len(group) * (group.mean(axis=0) - grand) ** 2 for group in groups)
+        within = sum(((group - group.mean(axis=0)) ** 2).sum(axis=0) for group in groups)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            f_stats = (between / (len(groups) - 1)) / (within / (len(data) - len(groups)))
+        f_stats = np.nan_to_num(f_stats, nan=0.0, posinf=0.0, neginf=0.0)
+        order = np.argsort(f_stats)[::-1][:8]
+        separation = {'max_f': round(float(f_stats.max()), 2), 'median_f': round(float(np.median(f_stats)), 2),
+                      'top_subcarriers': [{'subcarrier': int(index), 'f_statistic': round(float(f_stats[index]), 2)}
+                                          for index in order]}
+    return {'trial_id': trial_id, 'subcarriers': length, 'frames_analyzed': len(frames),
+            'labels': labels, 'separation': separation,
+            'note': 'Descriptive statistics of stored amplitude frames. Differences between labels do not establish human detection.'}
+
+
 @app.delete('/api/csi/trials/{trial_id}')
 async def delete_csi_trial(trial_id: int):
     runtime = app.state.runtime
@@ -420,6 +597,58 @@ async def calibrate():
 @app.get('/api/multi-person/stats')
 async def multi_person_stats():
     return {'supported': False, 'person_count': None, 'reason': 'No validated person-count model is connected.'}
+
+
+EVENT_SUMMARY_COLUMNS = ('id,started_at,ended_at,duration_s,peak_change_score,source,channel,baseline_dbm,neighbor_links,stop_reason')
+
+
+@app.get('/api/events')
+async def list_events(limit: int = Query(50, ge=1, le=200)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f'SELECT {EVENT_SUMMARY_COLUMNS} FROM events ORDER BY id DESC LIMIT ?', (limit,)) as cursor:
+            return {'events': [dict(row) for row in await cursor.fetchall()]}
+
+
+@app.get('/api/events/{event_id}')
+async def event_detail(event_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f'SELECT {EVENT_SUMMARY_COLUMNS},pre_frames,post_frames FROM events WHERE id=?', (event_id,)) as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(404, 'Event not found')
+    data = dict(row)
+    data['pre_frames'] = json.loads(data['pre_frames'])
+    data['post_frames'] = json.loads(data['post_frames'])
+    return data
+
+
+@app.delete('/api/events/{event_id}')
+async def delete_event(event_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        result = await db.execute('DELETE FROM events WHERE id=?', (event_id,))
+        await db.commit()
+        if result.rowcount == 0:
+            raise HTTPException(404, 'Event not found')
+    return {'message': 'Event record removed.'}
+
+
+class AlertSettings(BaseModel):
+    enabled: bool
+
+
+@app.get('/api/alerts')
+async def get_alerts():
+    return {'enabled': app.state.runtime.alerts_enabled,
+            'note': 'Shows a Windows notification when a sustained signal change starts. Alerts are optional and local.'}
+
+
+@app.post('/api/alerts')
+async def set_alerts(settings: AlertSettings):
+    runtime = app.state.runtime
+    runtime.alerts_enabled = settings.enabled
+    return {'enabled': runtime.alerts_enabled, 'message': 'Alerts enabled.' if settings.enabled else 'Alerts disabled.'}
 
 
 class ZoneMap(BaseModel):
