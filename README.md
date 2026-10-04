@@ -30,7 +30,7 @@ Under the hood WiWave performs real-time **RSSI motion detection** (received sig
 ## 📸 See it live
 
 | Live Monitor — real hardware | CSI Subcarrier Waterfall | 3D Observatory |
-| --- | --- | --- |
+| --| --- | --- |
 | ![WiFi motion detection dashboard showing live RSSI, neighbor access point links, spectral analysis and the event journal on real Windows hardware](assets/readme-live-monitor.png) | ![ESP32 CSI channel state information subcarrier amplitude waterfall heatmap](assets/readme-csi-waterfall.png) | ![WiFi sensing 3D observatory room visualization with simulated multi-person tracking](assets/readme-observatory-demo.png) |
 | Your laptop's actual Wi-Fi adapter, ~10 readings/second | Subcarrier-level CSI view (demo data shown; real with an ESP32) | Explorable room scene with 12 scenarios |
 
